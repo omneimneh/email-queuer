@@ -1,0 +1,37 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 16
+VisualStudioVersion = 16.0.30011.22
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "EmailQueuer", "EmailQueuer\EmailQueuer.csproj", "{30E205BE-BA3D-4D81-A886-D27379D61D89}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "EmailQueuer.Example", "EmailQueuer.Example\EmailQueuer.Example.csproj", "{4A51ED70-111A-4B65-83BD-6A7AD5980FE2}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Solution Items", "Solution Items", "{7D10904F-302F-40FC-98B6-99982A3C5846}"
+	ProjectSection(SolutionItems) = preProject
+		.gitignore = .gitignore
+		README.md = README.md
+	EndProjectSection
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{30E205BE-BA3D-4D81-A886-D27379D61D89}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{30E205BE-BA3D-4D81-A886-D27379D61D89}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{30E205BE-BA3D-4D81-A886-D27379D61D89}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{30E205BE-BA3D-4D81-A886-D27379D61D89}.Release|Any CPU.Build.0 = Release|Any CPU
+		{4A51ED70-111A-4B65-83BD-6A7AD5980FE2}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{4A51ED70-111A-4B65-83BD-6A7AD5980FE2}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{4A51ED70-111A-4B65-83BD-6A7AD5980FE2}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{4A51ED70-111A-4B65-83BD-6A7AD5980FE2}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {0E451ADD-B695-4A4E-8778-D3AAA5467A7A}
+	EndGlobalSection
+EndGlobal

@@ -1,0 +1,19 @@
+﻿@using RazorLight
+@inherits TemplatePage<EmailQueuer.Example.RazorModels.Person>
+
+@{
+    Layout = "Layout.cshtml";
+}
+
+<style>
+    .container {
+        padding: 10px;
+        background-color: cornflowerblue;
+        border: 2px solid black;
+    }
+</style>
+
+<!-- Style will be rendered inline if "MoveCssInline" is used -->
+<div class="container">
+    Hello @Model.LastName, @Model.FirstName
+</div>
