@@ -1,14 +1,13 @@
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
-using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.EntityFrameworkCore;
-using EmailQueuer.Extensions;
 using Microsoft.Extensions.Configuration;
-using EmailQueuer.Example.Mails;
+using CodeSwitch.Utils.EmailQueuer.Example.Mails;
+using CodeSwitch.Utils.EmailQueuer.Extensions;
 
-namespace EmailQueuer.Example
+namespace CodeSwitch.Utils.EmailQueuer.Example
 {
     public class Startup
     {

@@ -12,7 +12,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\EmailQueuer\EmailQueuer.csproj" />
+    <ProjectReference Include="..\CodeSwitch.Utils.EmailQueuer\CodeSwitch.Utils.EmailQueuer.csproj" />
   </ItemGroup>
 
   <ItemGroup>

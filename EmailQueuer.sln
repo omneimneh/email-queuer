@@ -3,9 +3,9 @@ Microsoft Visual Studio Solution File, Format Version 12.00
 # Visual Studio Version 16
 VisualStudioVersion = 16.0.30011.22
 MinimumVisualStudioVersion = 10.0.40219.1
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "EmailQueuer", "EmailQueuer\EmailQueuer.csproj", "{30E205BE-BA3D-4D81-A886-D27379D61D89}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CodeSwitch.Utils.EmailQueuer", "CodeSwitch.Utils.EmailQueuer\CodeSwitch.Utils.EmailQueuer.csproj", "{30E205BE-BA3D-4D81-A886-D27379D61D89}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "EmailQueuer.Example", "EmailQueuer.Example\EmailQueuer.Example.csproj", "{4A51ED70-111A-4B65-83BD-6A7AD5980FE2}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CodeSwitch.Utils.EmailQueuer.Example", "CodeSwitch.Utils.EmailQueuer.Example\CodeSwitch.Utils.EmailQueuer.Example.csproj", "{4A51ED70-111A-4B65-83BD-6A7AD5980FE2}"
 EndProject
 Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Solution Items", "Solution Items", "{7D10904F-302F-40FC-98B6-99982A3C5846}"
 	ProjectSection(SolutionItems) = preProject

@@ -1,9 +1,9 @@
-﻿using EmailQueuer.Options;
+﻿using CodeSwitch.Utils.EmailQueuer.Options;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using System;
 
-namespace EmailQueuer.Extensions
+namespace CodeSwitch.Utils.EmailQueuer.Extensions
 {
     public static class ServicesExtensions
     {

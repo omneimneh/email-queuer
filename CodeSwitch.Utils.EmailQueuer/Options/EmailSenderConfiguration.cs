@@ -1,6 +1,6 @@
 ﻿using System.Dynamic;
 
-namespace EmailQueuer.Options
+namespace CodeSwitch.Utils.EmailQueuer.Options
 {
     public class EmailSenderConfiguration
     {

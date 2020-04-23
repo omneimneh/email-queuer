@@ -1,21 +1,19 @@
-﻿using EmailQueuer.Models;
-using EmailQueuer.Options;
+﻿using CodeSwitch.Utils.EmailQueuer.Models;
+using CodeSwitch.Utils.EmailQueuer.Options;
 using FluentEmail.Core;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Options;
 using Newtonsoft.Json;
 using RazorLight;
 using System;
 using System.Collections.Generic;
-using System.Dynamic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 
-namespace EmailQueuer
+namespace CodeSwitch.Utils.EmailQueuer
 {
     public class EmailQueuer<TContext> : BackgroundService where TContext : DbContext, IEmailQueuerContext
     {

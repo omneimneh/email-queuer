@@ -4,7 +4,7 @@ using System.Dynamic;
 using System.Net;
 using System.Net.Mail;
 
-namespace EmailQueuer.Options
+namespace CodeSwitch.Utils.EmailQueuer.Options
 {
     public class EmailQueuerOptions
     {

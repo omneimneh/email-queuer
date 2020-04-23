@@ -1,8 +1,8 @@
 ﻿using System.Threading.Tasks;
-using EmailQueuer.Example.RazorModels;
+using CodeSwitch.Utils.EmailQueuer.Example.RazorModels;
 using Microsoft.AspNetCore.Mvc;
 
-namespace EmailQueuer.Example.Controllers
+namespace CodeSwitch.Utils.EmailQueuer.Example.Controllers
 {
     public class HomeController : Controller
     {

@@ -10,7 +10,7 @@ This library can do the following:
 Follow these steps to get your email queuer up and running
 
 #### Install package from Nuget
-Run the following command in your package manager console: `Install-Package EmailQueuer`
+Run the following command in your package manager console: `Install-Package CodeSwitch.Utils.EmailQueuer`
 
 #### Add your Razor templates
 Create a folder for your templates, then create an empty class in that folder, let's call it `Mails.cs`
@@ -36,7 +36,7 @@ public class AppDbContext : DbContext, IEmailQueuerContext
 {
     public AppDbContext(DbContextOptions options) : base(options) { }
    
-    // Add the rqeuired table
+    // Add the required table
     public virtual DbSet<EmailQueuerTask> EmailQueuerTasks { get; set; }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)

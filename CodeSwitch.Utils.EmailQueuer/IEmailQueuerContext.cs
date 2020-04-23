@@ -1,7 +1,7 @@
-﻿using EmailQueuer.Models;
+﻿using CodeSwitch.Utils.EmailQueuer.Models;
 using Microsoft.EntityFrameworkCore;
 
-namespace EmailQueuer
+namespace CodeSwitch.Utils.EmailQueuer
 {
     public interface IEmailQueuerContext
     {

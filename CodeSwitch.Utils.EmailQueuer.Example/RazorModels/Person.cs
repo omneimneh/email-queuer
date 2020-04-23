@@ -1,4 +1,4 @@
-﻿namespace EmailQueuer.Example.RazorModels
+﻿namespace CodeSwitch.Utils.EmailQueuer.Example.RazorModels
 {
     public class Person
     {

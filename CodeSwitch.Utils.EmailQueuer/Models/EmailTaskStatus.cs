@@ -1,4 +1,4 @@
-﻿namespace EmailQueuer.Models
+﻿namespace CodeSwitch.Utils.EmailQueuer.Models
 {
     public enum EmailTaskStatus
     {

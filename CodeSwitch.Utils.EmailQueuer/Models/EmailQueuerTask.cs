@@ -1,6 +1,6 @@
 ﻿using System;
 
-namespace EmailQueuer.Models
+namespace CodeSwitch.Utils.EmailQueuer.Models
 {
     public class EmailQueuerTask
     {
