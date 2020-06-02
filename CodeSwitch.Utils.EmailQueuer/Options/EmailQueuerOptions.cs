@@ -69,8 +69,9 @@ namespace CodeSwitch.Utils.EmailQueuer.Options
             Sender = new NetworkCredential(options.Sender.Email, options.Sender.Password);
             SmtpClient.Credentials = Sender;
 
-            ViewBag = options.ViewBag;
+            ViewBag = options.ViewBag ?? Default.ViewBag;
             MoveCssInline = options.MoveCssInline;
+            TemplatePath = options.TemplatePath;
         }
     }
 }

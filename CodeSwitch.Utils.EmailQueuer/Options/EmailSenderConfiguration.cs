@@ -8,5 +8,6 @@ namespace CodeSwitch.Utils.EmailQueuer.Options
         public SmtpConfiguration Smtp { get; set; }
         public ExpandoObject ViewBag { get; set; }
         public bool MoveCssInline { get; set; }
+        public string TemplatePath { get; set; }
     }
 }
