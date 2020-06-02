@@ -7,12 +7,15 @@
     <PackageId>CodeSwitch.Utils.EmailQueuer</PackageId>
     <PackageTags>Email, Smtp, Queue, Razor</PackageTags>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
-    <PackageReleaseNotes>Intial release</PackageReleaseNotes>
+    <PackageReleaseNotes>Fixed ciritical issue. The package now works as intended.</PackageReleaseNotes>
     <Description>A library for asp.net core that allows you to send emails without having memory leaks</Description>
     <RepositoryUrl>https://github.com/omneimneh/email-queuer</RepositoryUrl>
     <RepositoryType></RepositoryType>
     <PackageIcon>icon.png</PackageIcon>
     <PackageProjectUrl>https://github.com/omneimneh/email-queuer</PackageProjectUrl>
+    <AssemblyVersion>1.0.0.0</AssemblyVersion>
+    <FileVersion>1.0.0.0</FileVersion>
+    <Version>1.0.2</Version>
   </PropertyGroup>
 
   <ItemGroup>

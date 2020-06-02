@@ -83,7 +83,7 @@ namespace CodeSwitch.Utils.EmailQueuer
 
             if (!isLooping)
             {
-                await StartLoopAsync().ConfigureAwait(false);
+                _ = StartLoopAsync();
             }
         }
 
