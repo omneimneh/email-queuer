@@ -51,9 +51,9 @@ namespace CodeSwitch.Utils.EmailQueuer
         /// <param name="model">The model with contains the data</param>
         /// <param name="subId">Optional unsubscribe link with subscription Id</param>
         /// <returns>Async task (does not wait for the email to be sent)</returns>
-        public Task EnqueueAsync<T>(IEnumerable<string> to, string subject, string template, T model)
+        public Task EnqueueAsync<T>(IEnumerable<string> to, string subject, string template, T model, string cc = "", string bcc = "", string attachementPaths = "")
         {
-            return EnqueueAsync(string.Join(";", to), subject, template, model);
+            return EnqueueAsync(string.Join(";", to), subject, template, model, cc, bcc, attachementPaths);
         }
 
         /// <summary>
@@ -65,13 +65,16 @@ namespace CodeSwitch.Utils.EmailQueuer
         /// <param name="model">The model with contains the data</param>
         /// <param name="subId">Optional unsubscribe link with subscription Id</param>
         /// <returns>Async task (does not wait for the email to be sent)</returns>
-        public async Task EnqueueAsync<T>(string to, string subject, string template, T model)
+        public async Task EnqueueAsync<T>(string to, string subject, string template, T model, string cc = "", string bcc = "", string attachmentPaths = "")
         {
             using var scope = factory.CreateScope();
             var context = scope.ServiceProvider.GetRequiredService<TContext>();
             context.EmailQueuerTasks.Add(new EmailQueuerTask
             {
                 To = to,
+                CC = cc,
+                BCC = bcc,
+                AttachmentPaths = attachmentPaths,
                 Subject = subject,
                 Template = template,
                 CreatedOn = DateTime.UtcNow,
