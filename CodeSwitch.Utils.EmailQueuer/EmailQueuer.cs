@@ -110,13 +110,31 @@ namespace CodeSwitch.Utils.EmailQueuer
                 .Select(e => new FluentEmail.Core.Models.Address { EmailAddress = e })
                 .ToArray();
 
+            var cc = emailTask.CC.Split(";")
+                .Select(e => new FluentEmail.Core.Models.Address { EmailAddress = e })
+                .ToArray();
+
+            var bcc = emailTask.BCC.Split(";")
+                .Select(e => new FluentEmail.Core.Models.Address { EmailAddress = e })
+                .ToArray();
+
+            var attachmentFileNames = emailTask.AttachmentPaths.Split(";");
+
             var body = await GenerateEmailBody(emailTask.Template, data);
 
-            await fluent.Create()
+            var emailToSend = fluent.Create()
                 .To(emails)
+                .CC(cc)
+                .BCC(bcc)
                 .Subject(emailTask.Subject)
-                .Body(body, true)
-                .SendAsync();
+                .Body(body, true);
+
+            foreach(var attachmentFileName in attachmentFileNames)
+            {
+                emailToSend.AttachFromFilename(attachmentFileName);
+            }
+
+            await emailToSend.SendAsync();
         }
 
         private async Task<string> GenerateEmailBody(string template, object model)

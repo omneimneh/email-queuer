@@ -6,6 +6,9 @@ namespace CodeSwitch.Utils.EmailQueuer.Models
     {
         public int Id { get; set; }
         public string To { get; set; }
+        public string CC { get; set; }
+        public string BCC { get; set; }
+        public string AttachmentPaths { get; set; }
         public string Subject { get; set; }
         public string ModelJson { get; set; }
         public string Template { get; set; }
