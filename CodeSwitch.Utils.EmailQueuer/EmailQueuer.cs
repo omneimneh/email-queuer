@@ -113,11 +113,15 @@ namespace CodeSwitch.Utils.EmailQueuer
                 .Select(e => new FluentEmail.Core.Models.Address { EmailAddress = e })
                 .ToArray();
 
-            var cc = emailTask.CC.Split(";")
-                .Select(e => new FluentEmail.Core.Models.Address { EmailAddress = e })
-                .ToArray();
+            FluentEmail.Core.Models.Address[] cc = { };
+            if (!string.IsNullOrEmpty(emailTask.CC))
+               cc = emailTask.CC.Split(";")
+                    .Select(e => new FluentEmail.Core.Models.Address { EmailAddress = e })
+                    .ToArray();
 
-            var bcc = emailTask.BCC.Split(";")
+            FluentEmail.Core.Models.Address[] bcc = { };
+            if (!string.IsNullOrEmpty(emailTask.BCC))
+               bcc = emailTask.BCC.Split(";")
                 .Select(e => new FluentEmail.Core.Models.Address { EmailAddress = e })
                 .ToArray();
 
@@ -134,7 +138,8 @@ namespace CodeSwitch.Utils.EmailQueuer
 
             foreach(var attachmentFileName in attachmentFileNames)
             {
-                emailToSend.AttachFromFilename(attachmentFileName);
+                if (!string.IsNullOrEmpty(attachmentFileName))
+                    emailToSend.AttachFromFilename(attachmentFileName);
             }
 
             await emailToSend.SendAsync();
