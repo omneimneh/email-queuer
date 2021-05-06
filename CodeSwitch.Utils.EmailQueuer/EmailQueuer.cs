@@ -1,6 +1,7 @@
 ﻿using CodeSwitch.Utils.EmailQueuer.Models;
 using CodeSwitch.Utils.EmailQueuer.Options;
 using FluentEmail.Core;
+using FluentEmail.Smtp;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -10,6 +11,8 @@ using RazorLight;
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Net;
+using System.Net.Mail;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -101,10 +104,11 @@ namespace CodeSwitch.Utils.EmailQueuer
         {
             using var scope = factory.CreateScope();
             var fluent = scope.ServiceProvider.GetRequiredService<IFluentEmailFactory>();
-            await SendEmailAsync(emailTask, fluent);
+            var fluentEmail = fluent.Create();
+            await SendEmailAsync(emailTask, fluentEmail);
         }
 
-        private async Task SendEmailAsync(EmailQueuerTask emailTask, IFluentEmailFactory fluent)
+        private async Task SendEmailAsync(EmailQueuerTask emailTask, IFluentEmail fluentEmail)
         {
             var data = JsonConvert.DeserializeObject(emailTask.ModelJson,
                 options.Assembly.Assembly.GetType(emailTask.ModelType));
@@ -129,7 +133,7 @@ namespace CodeSwitch.Utils.EmailQueuer
 
             var body = await GenerateEmailBody(emailTask.Template, data);
 
-            var emailToSend = fluent.Create()
+            var emailToSend = fluentEmail
                 .To(emails)
                 .CC(cc)
                 .BCC(bcc)
@@ -169,6 +173,15 @@ namespace CodeSwitch.Utils.EmailQueuer
 
             while (context.EmailQueuerTasks.Any(x => x.Status == EmailTaskStatus.Pending))
             {
+                // check if the emailtask has a custom smtp profile and use it alternatively over the predefined one
+                var fluentEmail = fluent.Create();
+                // fluentEmail.Sender = new SmtpSender(new SmtpClient {
+                //     Host = "",
+                //     Port = 0,
+                //     EnableSsl = true,
+                //     Credentials = new NetworkCredential("", "")
+                // });
+
                 var emailTask = await context.EmailQueuerTasks
                     .Where(x => x.Status == EmailTaskStatus.Pending)
                     .OrderBy(x => x.CreatedOn).FirstOrDefaultAsync();
@@ -180,7 +193,7 @@ namespace CodeSwitch.Utils.EmailQueuer
                     emailTask.Status = EmailTaskStatus.Sending;
                     await context.SaveChangesAsync();
 
-                    await SendEmailAsync(emailTask, fluent);
+                    await SendEmailAsync(emailTask, fluentEmail);
                     logger.LogInformation("Email sent successfully");
 
                     emailTask.Status = EmailTaskStatus.Sent;
