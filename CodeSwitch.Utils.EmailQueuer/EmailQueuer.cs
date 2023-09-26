@@ -147,10 +147,13 @@ namespace CodeSwitch.Utils.EmailQueuer
 
         private async Task<string> GenerateEmailBody(string template, object model)
         {
+            logger.LogInformation($"GenerateEmailBody with template : {template}");
             var engine = new RazorLightEngineBuilder().UseEmbeddedResourcesProject(options.Assembly).Build();
 
             dynamic viewBag = options.ViewBag;
             viewBag.Subject = template.ToString();
+
+            logger.LogInformation($"GenerateEmailBody with template path : {options.TemplatePath}");
 
             string html = await engine.CompileRenderAsync(string.Format(options.TemplatePath, template), model, viewBag);
             if (options.MoveCssInline)
