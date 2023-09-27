@@ -15,7 +15,7 @@ namespace CodeSwitch.Utils.EmailQueuer.Example.Controllers
 
         public async Task<IActionResult> Index()
         {
-            var email = "om.mneimneh@gmail.com";
+            var email = "salah.khat96@gmail.com";
             await emailQueuer.EnqueueAsync(email, "Example", "Welcome", new Person
             {
                 FirstName = "FName",

@@ -3,7 +3,8 @@ A library for asp.net core that allows you to send emails without having memory 
 This library can do the following:
 - Send emails in the background without risking a Memory crash
 - Saves the status of each email so you can resend emails that encountered errors while sending
-- Use razor templating engine (RazorLight)
+- Use razor templating engine (RazorLight) (version < 1.0.5.3)
+- Use razor templating engine (Razor.Templating.Core) (version > 2.0.0)
 - Move global css inline to support email styling without the headache of inline styles.
 
 ## How to use
@@ -75,7 +76,8 @@ This is how your `appsettings.json` should look like, replace `<SectionName>` wi
     "ViewBag": {
       "WebsiteLink": "https://github.com/omneimneh/email-queuer"
     },
-    "MoveCssInline": true
+    "MoveCssInline": true,
+    "TemplatePath": "/FolderContainingRazorTemplates/{0}.cshtml"
   }
 ```
 

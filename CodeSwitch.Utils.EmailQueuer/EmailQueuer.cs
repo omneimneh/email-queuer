@@ -6,12 +6,12 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Newtonsoft.Json;
-using RazorLight;
 using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Razor.Templating.Core;
 
 namespace CodeSwitch.Utils.EmailQueuer
 {
@@ -147,15 +147,12 @@ namespace CodeSwitch.Utils.EmailQueuer
 
         private async Task<string> GenerateEmailBody(string template, object model)
         {
-            logger.LogInformation($"GenerateEmailBody with template : {template}");
-            var engine = new RazorLightEngineBuilder().UseEmbeddedResourcesProject(options.Assembly).Build();
+            var viewDataOrViewBag = new Dictionary<string, object>();
+            viewDataOrViewBag["Subject"] = template.ToString();
 
-            dynamic viewBag = options.ViewBag;
-            viewBag.Subject = template.ToString();
+            logger.LogInformation($"GenerateEmailBody with template path : {string.Format(options.TemplatePath, template)}");
 
-            logger.LogInformation($"GenerateEmailBody with template path : {options.TemplatePath}");
-
-            string html = await engine.CompileRenderAsync(string.Format(options.TemplatePath, template), model, viewBag);
+            var html = await RazorTemplateEngine.RenderAsync(string.Format(options.TemplatePath, template), model, viewDataOrViewBag);
             if (options.MoveCssInline)
             {
                 using var preMailer = new PreMailer.Net.PreMailer(html);
