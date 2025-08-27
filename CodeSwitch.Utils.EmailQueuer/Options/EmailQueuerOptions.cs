@@ -34,6 +34,14 @@ namespace CodeSwitch.Utils.EmailQueuer.Options
         /// A class at the root of the template folder, razor models should exist in the same assembly
         /// </summary>
         public Type Assembly { get; set; }
+    /// <summary>
+    /// Maximum retry attempts for a failed email before marking permanently failed
+    /// </summary>
+    public int MaxRetryAttempts { get; set; } = 3;
+    /// <summary>
+    /// Base delay in seconds before the next retry attempt (exponential backoff applied)
+    /// </summary>
+    public int RetryBackoffSeconds { get; set; } = 30;
 
         private NetworkCredential _sender;
 
@@ -46,7 +54,9 @@ namespace CodeSwitch.Utils.EmailQueuer.Options
                 DeliveryMethod = SmtpDeliveryMethod.Network
             },
             TemplatePath = "{0}.cshtml",
-            ViewBag = new ExpandoObject()
+            ViewBag = new ExpandoObject(),
+            MaxRetryAttempts = 3,
+            RetryBackoffSeconds = 30
         };
 
         public void LoadFromConfiguration(IConfiguration configuration, string sectionName = nameof(EmailQueuer))
@@ -72,6 +82,12 @@ namespace CodeSwitch.Utils.EmailQueuer.Options
             ViewBag = options.ViewBag ?? Default.ViewBag;
             MoveCssInline = options.MoveCssInline;
             TemplatePath = options.TemplatePath;
+            // Optional retry configuration (if present in configuration section)
+            if (options is EmailSenderConfiguration ext)
+            {
+                if (ext.MaxRetryAttempts > 0) MaxRetryAttempts = ext.MaxRetryAttempts;
+                if (ext.RetryBackoffSeconds > 0) RetryBackoffSeconds = ext.RetryBackoffSeconds;
+            }
         }
     }
 }

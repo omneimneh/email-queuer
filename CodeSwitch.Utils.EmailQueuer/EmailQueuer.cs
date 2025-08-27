@@ -167,13 +167,51 @@ namespace CodeSwitch.Utils.EmailQueuer
             var context = scope.ServiceProvider.GetRequiredService<TContext>();
             var fluent = scope.ServiceProvider.GetRequiredService<IFluentEmailFactory>();
 
-            while (context.EmailQueuerTasks.Any(x => x.Status == EmailTaskStatus.Pending))
+            // Process all tasks that are currently due (ready now)
+            while (true)
             {
+                var now = DateTime.UtcNow;
                 var emailTask = await context.EmailQueuerTasks
-                    .Where(x => x.Status == EmailTaskStatus.Pending)
-                    .OrderBy(x => x.CreatedOn).FirstOrDefaultAsync();
+                    .Where(x => (x.Status == EmailTaskStatus.Pending || x.Status == EmailTaskStatus.Error)
+                                && (x.NextAttemptOn == null || x.NextAttemptOn <= now))
+                    .OrderBy(x => x.CreatedOn)
+                    .FirstOrDefaultAsync();
 
-                logger.LogInformation($"Sending email to {emailTask.To}");
+                if (emailTask == null)
+                {
+                    // Nothing due right now. If there are future scheduled retries, schedule a delayed restart.
+                    var nextRetryTime = await context.EmailQueuerTasks
+                        .Where(x => (x.Status == EmailTaskStatus.Pending || x.Status == EmailTaskStatus.Error)
+                                    && x.NextAttemptOn != null)
+                        .OrderBy(x => x.NextAttemptOn)
+                        .Select(x => x.NextAttemptOn)
+                        .FirstOrDefaultAsync();
+
+                    if (nextRetryTime != null)
+                    {
+                        var delay = nextRetryTime.Value - DateTime.UtcNow;
+                        if (delay < TimeSpan.Zero) delay = TimeSpan.Zero;
+                        logger.LogDebug($"Scheduling background restart in {delay.TotalSeconds:F0}s for next retry batch");
+                        _ = Task.Run(async () =>
+                        {
+                            try
+                            {
+                                await Task.Delay(delay);
+                                if (!isLooping)
+                                {
+                                    _ = StartLoopAsync();
+                                }
+                            }
+                            catch (Exception ex)
+                            {
+                                logger.LogError(ex, "Error while scheduling next retry loop");
+                            }
+                        });
+                    }
+                    break; // Exit to release resources; a restart will occur when needed.
+                }
+
+                logger.LogInformation($"Sending email (Retry {emailTask.RetryCount}) to {emailTask.To}");
 
                 try
                 {
@@ -184,13 +222,26 @@ namespace CodeSwitch.Utils.EmailQueuer
                     logger.LogInformation("Email sent successfully");
 
                     emailTask.Status = EmailTaskStatus.Sent;
+                    emailTask.SentOn = DateTime.UtcNow;
                     await context.SaveChangesAsync();
                 }
                 catch (Exception ex)
                 {
                     logger.LogError(ex, "Error while sending email");
 
-                    emailTask.Status = EmailTaskStatus.Error;
+                    emailTask.RetryCount++;
+                    if (emailTask.RetryCount > options.MaxRetryAttempts)
+                    {
+                        emailTask.Status = EmailTaskStatus.PermanentlyFailed;
+                        logger.LogWarning($"Email task {emailTask.Id} permanently failed after {options.MaxRetryAttempts} attempts");
+                    }
+                    else
+                    {
+                        emailTask.Status = EmailTaskStatus.Error;
+                        var delaySeconds = options.RetryBackoffSeconds * (int)Math.Pow(2, Math.Max(0, emailTask.RetryCount - 1));
+                        emailTask.NextAttemptOn = DateTime.UtcNow.AddSeconds(delaySeconds);
+                        logger.LogInformation($"Scheduling retry #{emailTask.RetryCount} for task {emailTask.Id} in {delaySeconds} seconds");
+                    }
                     await context.SaveChangesAsync();
                 }
             }

@@ -5,6 +5,7 @@
         Pending,
         Sending,
         Sent,
-        Error
+    Error,
+    PermanentlyFailed
     }
 }

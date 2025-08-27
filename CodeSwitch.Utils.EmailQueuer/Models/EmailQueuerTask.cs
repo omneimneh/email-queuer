@@ -16,5 +16,7 @@ namespace CodeSwitch.Utils.EmailQueuer.Models
         public EmailTaskStatus Status { get; set; }
         public DateTime CreatedOn { get; set; }
         public DateTime SentOn { get; set; }
+    public int RetryCount { get; set; }
+    public DateTime? NextAttemptOn { get; set; }
     }
 }
