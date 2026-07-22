@@ -42,6 +42,17 @@ namespace CodeSwitch.Utils.EmailQueuer.Options
     /// Base delay in seconds before the next retry attempt (exponential backoff applied)
     /// </summary>
     public int RetryBackoffSeconds { get; set; } = 30;
+    /// <summary>
+    /// When false the background worker (hosted service) is NOT registered by AddEmailQueuer;
+    /// the EmailQueuer&lt;TContext&gt; singleton stays available so producers can still EnqueueAsync.
+    /// Use on parked/standby instances that must not drain the shared queue. Default true.
+    /// </summary>
+    public bool RunHostedService { get; set; } = true;
+    /// <summary>
+    /// Minutes a row may sit in Sending before it is considered orphaned and reclaimed to Error.
+    /// Must exceed the max realistic single-send time (SMTP timeout). Default 10.
+    /// </summary>
+    public int StaleClaimMinutes { get; set; } = 10;
 
         private NetworkCredential _sender;
 

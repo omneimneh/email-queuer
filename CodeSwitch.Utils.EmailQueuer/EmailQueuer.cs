@@ -84,7 +84,7 @@ namespace CodeSwitch.Utils.EmailQueuer
             });
             await context.SaveChangesAsync();
 
-            if (!isLooping)
+            if (options.RunHostedService && !isLooping)
             {
                 _ = StartLoopAsync();
             }
@@ -171,6 +171,16 @@ namespace CodeSwitch.Utils.EmailQueuer
             while (true)
             {
                 var now = DateTime.UtcNow;
+
+                // Stale-claim reclaim (§2-E.3): a row left in Sending past its stamped claim
+                // deadline (worker died mid-send, e.g. slot killed during a swap) is otherwise
+                // orphaned forever — the candidate query below only selects Pending|Error.
+                // Reuses the EXISTING nullable NextAttemptOn (NO schema change) as the deadline.
+                await context.EmailQueuerTasks
+                    .Where(x => x.Status == EmailTaskStatus.Sending
+                                && x.NextAttemptOn != null && x.NextAttemptOn <= now)
+                    .ExecuteUpdateAsync(s => s.SetProperty(x => x.Status, EmailTaskStatus.Error));
+
                 var emailTask = await context.EmailQueuerTasks
                     .Where(x => (x.Status == EmailTaskStatus.Pending || x.Status == EmailTaskStatus.Error)
                                 && (x.NextAttemptOn == null || x.NextAttemptOn <= now))
@@ -211,13 +221,31 @@ namespace CodeSwitch.Utils.EmailQueuer
                     break; // Exit to release resources; a restart will occur when needed.
                 }
 
+                // Atomic claim (§2-E.1): CAS Pending/Error -> Sending only if the row is still in
+                // the status we read. Stamp NextAttemptOn with the claim deadline so the reclaim
+                // above can recover it if this worker dies mid-send. 0 rows => another instance won.
+                var seenStatus = emailTask.Status;
+                var claimDeadline = now.AddMinutes(options.StaleClaimMinutes);
+                var claimed = await context.EmailQueuerTasks
+                    .Where(x => x.Id == emailTask.Id && x.Status == seenStatus)
+                    .ExecuteUpdateAsync(s => s
+                        .SetProperty(x => x.Status, EmailTaskStatus.Sending)
+                        .SetProperty(x => x.NextAttemptOn, claimDeadline));
+                if (claimed == 0)
+                {
+                    context.Entry(emailTask).State = EntityState.Detached;
+                    continue; // lost the race; move to next candidate
+                }
+                // Re-baseline the tracked entity so the later SaveChanges (Sent / Error) issues a
+                // correct UPDATE against the just-claimed DB state.
+                emailTask.Status = EmailTaskStatus.Sending;
+                emailTask.NextAttemptOn = claimDeadline;
+                context.Entry(emailTask).State = EntityState.Unchanged;
+
                 logger.LogInformation($"Sending email (Retry {emailTask.RetryCount}) to {emailTask.To}");
 
                 try
                 {
-                    emailTask.Status = EmailTaskStatus.Sending;
-                    await context.SaveChangesAsync();
-
                     await SendEmailAsync(emailTask, fluent);
                     logger.LogInformation("Email sent successfully");
 

@@ -27,7 +27,8 @@ namespace CodeSwitch.Utils.EmailQueuer.Extensions
 
             services.AddSingleton(options);
             services.AddSingleton<EmailQueuer<TContext>>();
-            services.AddHostedService(x => x.GetRequiredService<EmailQueuer<TContext>>());
+            if (options.RunHostedService)
+                services.AddHostedService(x => x.GetRequiredService<EmailQueuer<TContext>>());
         }
     }
 }

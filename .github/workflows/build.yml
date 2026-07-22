@@ -1,0 +1,65 @@
+# Publishes CodeSwitch.Utils.EmailQueuer to NuGet.org using Trusted Publishing (OIDC) —
+# no long-lived API key. Matches the nuget.org trusted-publishing policy:
+#   Policy name ....... email-queuer-publish-policy
+#   Package owner ..... salah.khat
+#   Repository owner .. omneimneh
+#   Repository ........ email-queuer
+#   Workflow file ..... build.yml   (this file — must stay at .github/workflows/build.yml)
+#   Environment ....... production  (job MUST declare `environment: production`)
+#
+# Flow: bump <Version> in the csproj -> cut a GitHub Release (or run manually) ->
+# this job requests a short-lived key from nuget.org (valid ~1h) and pushes the package.
+name: Publish EmailQueuer to NuGet.org
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch: {}   # allow manual publishing from the Actions tab
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    # Must match the "Environment" field of the trusted-publishing policy (production).
+    environment: production
+    permissions:
+      id-token: write   # required: lets GitHub mint the OIDC token nuget.org validates
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Restore
+        run: dotnet restore CodeSwitch.Utils.EmailQueuer/CodeSwitch.Utils.EmailQueuer.csproj
+
+      # GeneratePackageOnBuild=true in the csproj emits the .nupkg during build.
+      # (A separate `dotnet pack` conflicts with that setting — NU5026 — so we build.)
+      # PackageOutputPath pins the .nupkg to ./artifacts regardless of the default bin path.
+      - name: Build & pack (Release)
+        run: >
+          dotnet build CodeSwitch.Utils.EmailQueuer/CodeSwitch.Utils.EmailQueuer.csproj
+          -c Release --no-restore
+          -p:PackageOutputPath=${{ github.workspace }}/artifacts
+
+      # Exchange the GitHub OIDC token for a short-lived nuget.org API key.
+      # `user` is the nuget.org account/profile name that owns the package (NOT an email).
+      # Requested here, immediately before the push, because the key expires in ~1 hour.
+      - name: NuGet login (OIDC -> temporary API key)
+        id: login
+        uses: NuGet/login@v1
+        with:
+          user: salah.khat
+
+      - name: Push to NuGet.org
+        run: >
+          dotnet nuget push "${{ github.workspace }}/artifacts/*.nupkg"
+          --api-key ${{ steps.login.outputs.NUGET_API_KEY }}
+          --source https://api.nuget.org/v3/index.json
+          --skip-duplicate
