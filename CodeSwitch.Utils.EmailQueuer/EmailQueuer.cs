@@ -175,10 +175,16 @@ namespace CodeSwitch.Utils.EmailQueuer
                 // Stale-claim reclaim (§2-E.3): a row left in Sending past its stamped claim
                 // deadline (worker died mid-send, e.g. slot killed during a swap) is otherwise
                 // orphaned forever — the candidate query below only selects Pending|Error.
-                // Reuses the EXISTING nullable NextAttemptOn (NO schema change) as the deadline.
+                // Two arms, both reusing EXISTING nullable columns (NO schema change):
+                //   1. NextAttemptOn stamped (claimed by 2.2.0+ code) and past the deadline.
+                //   2. NextAttemptOn NULL (row moved to Sending by pre-2.2.0 code, which never
+                //      stamped a deadline) and older than the StaleClaimMinutes window by
+                //      CreatedOn — without this arm such legacy rows stay orphaned forever.
+                var legacyCutoff = now.AddMinutes(-options.StaleClaimMinutes);
                 await context.EmailQueuerTasks
                     .Where(x => x.Status == EmailTaskStatus.Sending
-                                && x.NextAttemptOn != null && x.NextAttemptOn <= now)
+                                && ((x.NextAttemptOn != null && x.NextAttemptOn <= now)
+                                    || (x.NextAttemptOn == null && x.CreatedOn <= legacyCutoff)))
                     .ExecuteUpdateAsync(s => s.SetProperty(x => x.Status, EmailTaskStatus.Error));
 
                 var emailTask = await context.EmailQueuerTasks
