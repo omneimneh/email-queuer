@@ -18,5 +18,7 @@ namespace CodeSwitch.Utils.EmailQueuer.Options
         public int? StaleClaimMinutes { get; set; }
         public bool? PartitionFairness { get; set; }
         public int? PollIntervalSeconds { get; set; }
+        // 2.3.0-rc.2
+        public int? SendTimeoutSeconds { get; set; }
     }
 }

@@ -1,4 +1,5 @@
-﻿using CodeSwitch.Utils.EmailQueuer.Models;
+﻿using CodeSwitch.Utils.EmailQueuer.Delivery;
+using CodeSwitch.Utils.EmailQueuer.Models;
 using CodeSwitch.Utils.EmailQueuer.Options;
 using FluentEmail.Core;
 using Microsoft.EntityFrameworkCore;
@@ -24,7 +25,16 @@ namespace CodeSwitch.Utils.EmailQueuer
         private const int MinPollIntervalSeconds = 30;
         /// <summary>Wait before the next pass after a pass died on an exception (a SQL error for instance).</summary>
         private const int PassFailureRetrySeconds = 120;
-        private const int MinSendTimeoutSeconds = 30;
+        /// <summary>Floor on the send timeout, whatever the configuration says.</summary>
+        private const int MinSendTimeoutSeconds = 5;
+        /// <summary>
+        /// An SMTP connection idle longer than this is closed (QUIT) and a new one opened for the
+        /// next send. Far below the 4-minute idle timeout of Azure SNAT and NAT gateways, past which
+        /// a connection is dropped silently and the next command on it never gets an answer.
+        /// </summary>
+        internal static readonly TimeSpan MaxSmtpConnectionIdle = TimeSpan.FromSeconds(30);
+        /// <summary>Messages sent on one SMTP connection before it is replaced by a new one.</summary>
+        internal const int MaxMessagesPerSmtpConnection = 50;
         private const int MaxTrackedPartitions = 1024;
         /// <summary>Ids remembered as "already failed in this outage". Past it new ids are counted but not remembered.</summary>
         private const int MaxTrackedOutageRows = 1024;
@@ -313,13 +323,30 @@ namespace CodeSwitch.Utils.EmailQueuer
         {
             using var scope = factory.CreateScope();
             var fluent = scope.ServiceProvider.GetRequiredService<IFluentEmailFactory>();
-            await SendEmailAsync(emailTask, fluent);
+            // Its own connection: a manual send may run while a pass is using the pass's one.
+            using var delivery = CreateDelivery();
+            var email = await BuildEmailAsync(emailTask, fluent);
+            await DeliverAsync(email, delivery);
         }
 
-        private async Task SendEmailAsync(EmailQueuerTask emailTask, IFluentEmailFactory fluent)
+        /// <summary>
+        /// The send timeout in force: <see cref="EmailQueuerOptions.SendTimeoutSeconds"/> (a value of
+        /// 0 or less means the default), at least <see cref="MinSendTimeoutSeconds"/>, and never more
+        /// than 80% of the stale-claim window so a send always ends before another instance could
+        /// reclaim its row.
+        /// </summary>
+        internal TimeSpan EffectiveSendTimeout()
         {
-            var email = await BuildEmailAsync(emailTask, fluent);
-            await DeliverAsync(email);
+            var staleCeiling = (long)Math.Max(1, options.StaleClaimMinutes) * 60 * 4 / 5;
+            long configured = options.SendTimeoutSeconds > 0 ? options.SendTimeoutSeconds : EmailQueuerOptions.DefaultSendTimeoutSeconds;
+            var seconds = Math.Max(MinSendTimeoutSeconds, Math.Min(configured, staleCeiling));
+            return TimeSpan.FromSeconds(seconds);
+        }
+
+        private SmtpDelivery CreateDelivery()
+        {
+            return new SmtpDelivery(options.SmtpClient ?? new System.Net.Mail.SmtpClient(), EffectiveSendTimeout(),
+                MaxSmtpConnectionIdle, MaxMessagesPerSmtpConnection);
         }
 
         /// <summary>
@@ -368,23 +395,44 @@ namespace CodeSwitch.Utils.EmailQueuer
         }
 
         /// <summary>
-        /// The send call itself. It is cancelled after 80% of the stale-claim window, so a send
-        /// that hangs cannot hold the worker for the life of the process, and ends before another
-        /// instance could reclaim the row. A response the sender marks unsuccessful is a failure.
+        /// The send call itself, bounded by <see cref="EffectiveSendTimeout"/> (60 seconds by
+        /// default), so a send that hangs fails like any other send: the row records the error and
+        /// waits its backoff, and the queue moves on to the next email.
+        ///
+        /// With the SMTP sender AddEmailQueuer registers, the message goes through
+        /// <paramref name="delivery"/>, which owns the connection and aborts it on timeout
+        /// (2.3.0-rc.2: FluentEmail's SmtpSender ignores cancellation and keeps one connection open
+        /// for the life of the process, see <see cref="SmtpDelivery"/>). Any other ISender the host
+        /// registered is still called and the wait for it is bounded the same way; a send it does
+        /// not stop when cancelled is abandoned, not awaited. A response the sender marks
+        /// unsuccessful is a failure.
         /// </summary>
-        private async Task DeliverAsync(IFluentEmail email)
+        private async Task DeliverAsync(IFluentEmail email, SmtpDelivery delivery)
         {
-            var timeoutSeconds = Math.Max(MinSendTimeoutSeconds, (long)Math.Max(1, options.StaleClaimMinutes) * 60 * 4 / 5);
-            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(timeoutSeconds));
+            if (email.Sender is FluentEmail.Smtp.SmtpSender && options.SmtpClient != null)
+            {
+                await delivery.SendAsync(email.Data);
+                return;
+            }
+
+            var sendTimeout = delivery.SendTimeout;
+            using var timeout = new CancellationTokenSource(sendTimeout);
+            var send = email.SendAsync(timeout.Token);
+            var finished = await Task.WhenAny(send, Task.Delay(sendTimeout));
+            if (finished != send)
+            {
+                _ = send.ContinueWith(t => _ = t.Exception, TaskContinuationOptions.OnlyOnFaulted);
+                throw new TimeoutException($"The send did not complete within {(long)sendTimeout.TotalSeconds} seconds and was abandoned");
+            }
 
             FluentEmail.Core.Models.SendResponse response;
             try
             {
-                response = await email.SendAsync(timeout.Token);
+                response = await send;
             }
             catch (OperationCanceledException) when (timeout.IsCancellationRequested)
             {
-                throw new TimeoutException($"The send did not complete within {timeoutSeconds} seconds and was cancelled");
+                throw new TimeoutException($"The send did not complete within {(long)sendTimeout.TotalSeconds} seconds and was cancelled");
             }
 
             if (response != null && !response.Successful)
@@ -440,6 +488,9 @@ namespace CodeSwitch.Utils.EmailQueuer
             using var scope = factory.CreateScope();
             var context = scope.ServiceProvider.GetRequiredService<TContext>();
             var fluent = scope.ServiceProvider.GetRequiredService<IFluentEmailFactory>();
+            // At most one SMTP connection at a time for the pass, reused only while fresh and closed
+            // (QUIT) when the pass ends. The next pass opens a new one.
+            using var delivery = CreateDelivery();
 
             var staleMinutes = Math.Max(1, options.StaleClaimMinutes);
             var fairness = options.PartitionFairness;
@@ -580,7 +631,7 @@ namespace CodeSwitch.Utils.EmailQueuer
                         return;
 
                     var laneKey = LaneKeyOf(row.PartitionKey, fairness);
-                    var outcome = await ProcessRowAsync(context, fluent, row, staleMinutes);
+                    var outcome = await ProcessRowAsync(context, fluent, delivery, row, staleMinutes);
                     if (outcome == RowOutcome.NotClaimed)
                         continue; // another instance won the row
 
@@ -668,7 +719,8 @@ namespace CodeSwitch.Utils.EmailQueuer
         /// <summary>
         /// Claims one row, sends it and records the result.
         /// </summary>
-        private async Task<RowOutcome> ProcessRowAsync(TContext context, IFluentEmailFactory fluent, EmailQueuerTask emailTask, int staleMinutes)
+        private async Task<RowOutcome> ProcessRowAsync(TContext context, IFluentEmailFactory fluent, SmtpDelivery delivery,
+            EmailQueuerTask emailTask, int staleMinutes)
         {
             // Atomic claim: CAS Pending/Error -> Sending only if the row is still as it was read
             // (same status and same RetryCount, so a row another instance sent or failed in the
@@ -708,7 +760,7 @@ namespace CodeSwitch.Utils.EmailQueuer
             {
                 var email = await BuildEmailAsync(emailTask, fluent);
                 sendStarted = true;
-                await DeliverAsync(email);
+                await DeliverAsync(email, delivery);
             }
             catch (Exception ex)
             {

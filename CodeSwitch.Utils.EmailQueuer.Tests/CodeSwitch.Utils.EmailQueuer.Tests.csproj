@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk.Razor">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+    <AddRazorSupportForMvc>true</AddRazorSupportForMvc>
+    <Nullable>disable</Nullable>
+    <!-- The tests drive a fake SMTP relay on 127.0.0.1 and an SQLite file; they run one at a time. -->
+  </PropertyGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" Version="8.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\CodeSwitch.Utils.EmailQueuer\CodeSwitch.Utils.EmailQueuer.csproj" />
+  </ItemGroup>
+
+</Project>

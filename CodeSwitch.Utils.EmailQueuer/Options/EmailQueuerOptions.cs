@@ -61,10 +61,22 @@ namespace CodeSwitch.Utils.EmailQueuer.Options
     public bool RunHostedService { get; set; } = true;
     /// <summary>
     /// Minutes a row may sit in Sending before it is considered orphaned and reclaimed to Error.
-    /// Must exceed the max realistic single-send time: since 2.3.0 a send still running after 80%
-    /// of this window is cancelled and recorded as a failed attempt. Default 10.
+    /// Only a worker that died mid-send leaves a row there: a send that fails or times out puts
+    /// its row back at once (see <see cref="SendTimeoutSeconds"/>). Default 10.
     /// </summary>
     public int StaleClaimMinutes { get; set; } = 10;
+        /// <summary>Default of <see cref="SendTimeoutSeconds"/>.</summary>
+        public const int DefaultSendTimeoutSeconds = 60;
+        /// <summary>
+        /// Seconds one send may take, from opening the SMTP connection to the server's answer to the
+        /// message (2.3.0-rc.2). Past it the connection is aborted and the send is a failed attempt:
+        /// the row records a TimeoutException in LastError and waits its retry backoff, and the
+        /// worker goes on with the next email. Floored at 5 and capped at 80% of
+        /// <see cref="StaleClaimMinutes"/>; 0 or less means the default, 60.
+        /// <see cref="System.Net.Mail.SmtpClient.Timeout"/> does not bound the queue's sends: .NET
+        /// applies it to the synchronous Send only.
+        /// </summary>
+        public int SendTimeoutSeconds { get; set; } = DefaultSendTimeoutSeconds;
         /// <summary>
         /// Ceiling in seconds on one retry wait (2.3.0). 0 (the default) means no configured ceiling,
         /// as before 2.3.0; a fixed ceiling of 24 hours then applies so the wait can never overflow.
@@ -188,6 +200,7 @@ namespace CodeSwitch.Utils.EmailQueuer.Options
                 if (ext.StaleClaimMinutes != null && ext.StaleClaimMinutes.Value > 0) StaleClaimMinutes = ext.StaleClaimMinutes.Value;
                 if (ext.PartitionFairness != null) PartitionFairness = ext.PartitionFairness.Value;
                 if (ext.PollIntervalSeconds != null) PollIntervalSeconds = Math.Max(0, ext.PollIntervalSeconds.Value);
+                if (ext.SendTimeoutSeconds != null && ext.SendTimeoutSeconds.Value > 0) SendTimeoutSeconds = ext.SendTimeoutSeconds.Value;
             }
         }
     }

@@ -23,7 +23,8 @@ New in 2.3.0 (**schema change**, see [Upgrading to 2.3.0](#upgrading-to-230)):
 - `MaxRetryBackoffSeconds` caps one retry wait; the wait can no longer overflow into an immediate-retry loop
 - `OutagePauseThreshold` pauses the queue during a mail server outage instead of failing every email in it
 - `PollIntervalSeconds` (default 120): the worker also wakes periodically, so an email made due outside the process (another instance, an admin screen, SQL) no longer waits for the next enqueue
-- The worker can no longer wedge after an exception or run two loops at once; a hung send is cancelled; a stale claim counts as a failed attempt
+- The worker can no longer wedge after an exception or run two loops at once; a stale claim counts as a failed attempt
+- 2.3.0-rc.2: every send is bounded by `SendTimeoutSeconds` (default 60), connect and TLS included, and an SMTP connection is never reused after 30 seconds idle. A send that hangs fails, records a `TimeoutException` in `LastError` and waits its retry backoff; the queue moves on at once
 - `StaleClaimMinutes` can be set from configuration
 
 ## How to use
@@ -195,7 +196,13 @@ Backoff formula: `nextDelay = min(MaxRetryBackoffSeconds, RetryBackoffSeconds * 
 
 **Waking up.** The worker runs a pass when the process starts, when `EnqueueAsync` is called in the same process, when the next scheduled retry is due, and (2.3.0) every `PollIntervalSeconds`. The periodic wake is what picks up an email made due by something the process cannot see: another instance, an admin screen re-arming a failed row, a SQL insert. A pass that fails (a database error for instance) no longer stops the worker: it is retried 120 seconds later.
 
-**Stale claims.** A row left in `Sending` for longer than `StaleClaimMinutes` (the worker died mid-send) goes back to `Error`. Since 2.3.0 that counts as a failed attempt: `RetryCount` is incremented, `LastError` says the claim expired, and a row already at the end of its budget becomes `PermanentlyFailed`. A send still running after 80% of `StaleClaimMinutes` is cancelled and recorded as a failed attempt.
+**Stale claims.** A row left in `Sending` for longer than `StaleClaimMinutes` (the worker died mid-send) goes back to `Error`. Since 2.3.0 that counts as a failed attempt: `RetryCount` is incremented, `LastError` says the claim expired, and a row already at the end of its budget becomes `PermanentlyFailed`. Since 2.3.0-rc.2 a send that hangs never leaves its row in `Sending`: it fails after `SendTimeoutSeconds`.
+
+**Hung sends (2.3.0-rc.2).** Every send runs under `SendTimeoutSeconds` (default 60, floor 5, at most 80% of `StaleClaimMinutes`). The bound covers the whole exchange: connecting, TLS, AUTH and the message. When it fires, the connection is aborted, the attempt is recorded like any other failure (`LastError` = `TimeoutException: The SMTP send to host:port did not complete within N seconds...`, `NextAttemptOn` = now + the retry backoff), and the worker sends the next email. `SmtpClient.Timeout` does not do this: .NET applies it to the synchronous `Send` only, and FluentEmail.Smtp 3.0.2 ignores the cancellation token it is given.
+
+The worker also manages the SMTP connection itself instead of sharing one `SmtpClient` for the life of the process. A connection is reused only between sends less than 30 seconds apart and for at most 50 messages, and it is closed with `QUIT` when the pass ends. Before, an asynchronous send never closed its connection, and the next send, however much later, wrote `MAIL FROM` onto it. A connection that a NAT dropped while idle (Azure drops idle flows silently after 4 minutes) never answered, and the send waited about 16 minutes for the operating system to give up on TCP, holding every email queued behind it.
+
+The `SmtpClient` you configure (`options.SmtpClient`, or the `Smtp` section) is used as a template: host, port, SSL, credentials, delivery method and certificates are copied to the client each connection uses. The message sent is the one FluentEmail.Smtp would have built. If you register an `ISender` other than FluentEmail's `SmtpSender`, the worker still calls it and stops waiting after `SendTimeoutSeconds`; a send your sender does not cancel keeps running in the background and may still go out, after which the retry sends it again.
 
 **Database cost.** The worker never polls faster than `PollIntervalSeconds` (floor 30 seconds) and never retries in a loop. An idle wake is 2 queries. While draining it is 2 queries per email plus 2 per batch of up to 10 emails (one batch per turn between partitions when several have mail). The stale-claim check adds no query unless a stale row exists.
 
@@ -211,6 +218,7 @@ All of them are optional and bind from the same section as the SMTP settings.
 | `StaleClaimMinutes` | 10 | Minutes in `Sending` before a claim is considered orphaned. Bindable from configuration since 2.3.0 (before, only in code) |
 | `PartitionFairness` | true | 2.3.0. Take turns between partition keys within a priority |
 | `PollIntervalSeconds` | 120 | 2.3.0. Seconds between periodic wakes; 1 to 29 is raised to 30; 0 turns the periodic wake off |
+| `SendTimeoutSeconds` | 60 | 2.3.0-rc.2. Bound on one send, connect included; floor 5, at most 80% of `StaleClaimMinutes`. A send past it fails and waits its retry backoff |
 
 `RunHostedService` (default true) is set in code only.
 
@@ -246,7 +254,8 @@ If it does not call `Initialize`, the two strings are generated as `nvarchar(max
 **3. What behaves differently with no configuration change.**
 - The worker now wakes every 120 seconds (`PollIntervalSeconds`), 2 small queries when the queue is idle. Set it to `0` to keep the previous behaviour, for instance on a database that pauses itself when idle.
 - A stale claim increments `RetryCount`, and can therefore end `PermanentlyFailed`.
-- A send still running after 80% of `StaleClaimMinutes` (8 minutes by default) is cancelled and recorded as a failed attempt. Before, a send that never returned stopped the worker for the life of the process.
+- A send still running after `SendTimeoutSeconds` (60 by default) is aborted and recorded as a failed attempt. Before, a send that never returned stopped the worker until the connection died (about 16 minutes on Linux), or for the life of the process. (2.3.0-rc.1 tried to cancel after 80% of `StaleClaimMinutes`, but the cancellation never reached the SMTP client.)
+- The SMTP connection is no longer kept open between passes: one connection per pass, reused only while sends are less than 30 seconds apart, closed with `QUIT` at the end of the pass.
 - A send whose `SendResponse.Successful` is false is now a failed attempt (it was recorded as sent). The built-in SMTP sender reports failures by throwing, so this only matters with a custom `ISender`.
 - The log lines carry the task id instead of the recipient address.
 - One retry wait is never longer than 24 hours.
