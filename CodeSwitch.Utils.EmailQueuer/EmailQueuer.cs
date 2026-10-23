@@ -81,6 +81,11 @@ namespace CodeSwitch.Utils.EmailQueuer
         private readonly Dictionary<string, long> lastServed = new Dictionary<string, long>();
         private long serveSequence;
 
+        // 2.4.0: with MaxConcurrentSends above 1, several senders of the running pass record their
+        // outcome at once. Every write to the outage and fairness state above is made under this
+        // lock (uncontended, and so free, with one sender).
+        private readonly object stateLock = new object();
+
         private enum RowOutcome { NotClaimed, Sent, Failed, Paused }
 
         private sealed class Lane
@@ -343,6 +348,24 @@ namespace CodeSwitch.Utils.EmailQueuer
             return TimeSpan.FromSeconds(seconds);
         }
 
+        /// <summary>
+        /// The number of emails sent at once: <see cref="EmailQueuerOptions.MaxConcurrentSends"/>,
+        /// at least 1 and at most <see cref="EmailQueuerOptions.MaxConcurrentSendsCeiling"/>.
+        /// </summary>
+        internal int EffectiveConcurrency()
+        {
+            return Math.Max(1, Math.Min(options.MaxConcurrentSends, EmailQueuerOptions.MaxConcurrentSendsCeiling));
+        }
+
+        /// <summary>
+        /// Rows read per round: <see cref="ClaimBatchSize"/>, or twice the concurrency when that is
+        /// more, so every sender has a row to take and the round does not end on one straggler.
+        /// </summary>
+        private int RoundBatchSize(int concurrency)
+        {
+            return Math.Max(ClaimBatchSize, concurrency * 2);
+        }
+
         private SmtpDelivery CreateDelivery()
         {
             return new SmtpDelivery(options.SmtpClient ?? new System.Net.Mail.SmtpClient(), EffectiveSendTimeout(),
@@ -495,6 +518,8 @@ namespace CodeSwitch.Utils.EmailQueuer
             var staleMinutes = Math.Max(1, options.StaleClaimMinutes);
             var fairness = options.PartitionFairness;
             var reclaimedThisPass = false;
+            var concurrency = EffectiveConcurrency();
+            var batchSize = RoundBatchSize(concurrency);
 
             while (!hostStopping.IsCancellationRequested)
             {
@@ -598,7 +623,7 @@ namespace CodeSwitch.Utils.EmailQueuer
                             ? query.Where(x => x.PartitionKey == null)
                             : query.Where(x => x.PartitionKey == partitionKey);
                     }
-                    batch = await query.OrderBy(x => x.Id).Take(ClaimBatchSize).ToListAsync();
+                    batch = await query.OrderBy(x => x.Id).Take(batchSize).ToListAsync();
                 }
                 else
                 {
@@ -607,7 +632,7 @@ namespace CodeSwitch.Utils.EmailQueuer
                     var headIds = lanes.Values
                         .OrderBy(l => LastServedOf(l.LaneKey))
                         .ThenBy(l => l.HeadId)
-                        .Take(ClaimBatchSize)
+                        .Take(batchSize)
                         .Select(l => l.HeadId)
                         .ToList();
                     // The due predicate is repeated here on purpose. Between the head read and
@@ -625,27 +650,41 @@ namespace CodeSwitch.Utils.EmailQueuer
                 }
 
                 var claimedAny = false;
-                foreach (var row in batch)
+                if (concurrency > 1 && !probing && batch.Count > 1)
                 {
-                    if (hostStopping.IsCancellationRequested)
-                        return;
+                    // 2.4.0: the round's rows go to up to N senders at once. The batch holds only
+                    // rows of the top priority (in turn order when partitions take turns), so the
+                    // priority lane and the turns are those of the sequential loop below; only the
+                    // order in which the sends of one round complete differs.
+                    var (claimed, stopped) = await SendConcurrentlyAsync(batch, fairness, staleMinutes, concurrency);
+                    if (stopped)
+                        return; // outage pause (its wake is armed) or the host is stopping
+                    claimedAny = claimed;
+                }
+                else
+                {
+                    foreach (var row in batch)
+                    {
+                        if (hostStopping.IsCancellationRequested)
+                            return;
 
-                    var laneKey = LaneKeyOf(row.PartitionKey, fairness);
-                    var outcome = await ProcessRowAsync(context, fluent, delivery, row, staleMinutes);
-                    if (outcome == RowOutcome.NotClaimed)
-                        continue; // another instance won the row
+                        var laneKey = LaneKeyOf(row.PartitionKey, fairness);
+                        var outcome = await ProcessRowAsync(context, fluent, delivery, row, staleMinutes);
+                        if (outcome == RowOutcome.NotClaimed)
+                            continue; // another instance won the row
 
-                    claimedAny = true;
-                    MarkServed(laneKey);
+                        claimedAny = true;
+                        lock (stateLock) MarkServed(laneKey);
 
-                    if (outcome == RowOutcome.Paused)
-                        return; // the wake for the end of the pause is already armed
+                        if (outcome == RowOutcome.Paused)
+                            return; // the wake for the end of the pause is already armed
 
-                    // The probe got through: the outage is over and the next round goes back to
-                    // priority and turns. (A probe that failed for the message's own reasons says
-                    // nothing about the server, so the next candidate is tried.)
-                    if (probing && outcome == RowOutcome.Sent)
-                        break;
+                        // The probe got through: the outage is over and the next round goes back to
+                        // priority and turns. (A probe that failed for the message's own reasons says
+                        // nothing about the server, so the next candidate is tried.)
+                        if (probing && outcome == RowOutcome.Sent)
+                            break;
+                    }
                 }
 
                 if (!claimedAny)
@@ -656,6 +695,78 @@ namespace CodeSwitch.Utils.EmailQueuer
                     return;
                 }
             }
+        }
+
+        /// <summary>
+        /// Sends one round's rows with up to <paramref name="concurrency"/> senders (2.4.0). Each
+        /// sender has its own scope (database context, FluentEmail factory) and its own SMTP
+        /// connection, takes the next row of the batch in order, and claims, sends and records it
+        /// exactly as the sequential loop does (<see cref="ProcessRowAsync"/>).
+        ///
+        /// No sender starts a new row once the host is stopping, an outage pause has been declared,
+        /// or a row failed with an exception (a SQL error for instance); the sends already under
+        /// way finish (each is bounded by the send timeout) and are recorded. The rows not started
+        /// stay as they are, with their whole retry budget. The first exception is rethrown once
+        /// every sender has ended, so the pass fails as it would have sequentially.
+        /// </summary>
+        /// <returns>Whether any row was claimed, and whether the pass must end now.</returns>
+        private async Task<(bool claimedAny, bool stop)> SendConcurrentlyAsync(List<EmailQueuerTask> batch, bool fairness,
+            int staleMinutes, int concurrency)
+        {
+            var next = -1;
+            var claimed = 0;
+            var stop = 0;
+            Exception firstError = null;
+
+            async Task SenderAsync()
+            {
+                using var scope = factory.CreateScope();
+                var context = scope.ServiceProvider.GetRequiredService<TContext>();
+                var fluent = scope.ServiceProvider.GetRequiredService<IFluentEmailFactory>();
+                using var delivery = CreateDelivery();
+
+                while (Volatile.Read(ref stop) == 0 && !hostStopping.IsCancellationRequested)
+                {
+                    var index = Interlocked.Increment(ref next);
+                    if (index >= batch.Count)
+                        return;
+
+                    var row = batch[index];
+                    RowOutcome outcome;
+                    try
+                    {
+                        outcome = await ProcessRowAsync(context, fluent, delivery, row, staleMinutes);
+                    }
+                    catch (Exception ex)
+                    {
+                        Interlocked.CompareExchange(ref firstError, ex, null);
+                        Volatile.Write(ref stop, 1);
+                        return;
+                    }
+
+                    if (outcome == RowOutcome.NotClaimed)
+                        continue; // another instance won the row
+
+                    Volatile.Write(ref claimed, 1);
+                    lock (stateLock) MarkServed(LaneKeyOf(row.PartitionKey, fairness));
+
+                    if (outcome == RowOutcome.Paused)
+                    {
+                        Volatile.Write(ref stop, 1); // the wake for the end of the pause is already armed
+                        return;
+                    }
+                }
+            }
+
+            var senders = new Task[Math.Min(concurrency, batch.Count)];
+            for (var i = 0; i < senders.Length; i++)
+                senders[i] = Task.Run(SenderAsync);
+            await Task.WhenAll(senders);
+
+            if (firstError != null)
+                System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(firstError).Throw();
+
+            return (Volatile.Read(ref claimed) != 0, Volatile.Read(ref stop) != 0 || hostStopping.IsCancellationRequested);
         }
 
         /// <summary>
@@ -778,7 +889,7 @@ namespace CodeSwitch.Utils.EmailQueuer
                 await SaveAndReleaseAsync(context);
 
                 // The mail server answered: any outage is over.
-                ResetOutageState();
+                lock (stateLock) ResetOutageState();
                 return RowOutcome.Sent;
             }
 
@@ -807,8 +918,20 @@ namespace CodeSwitch.Utils.EmailQueuer
             // a model, template, address or attachment problem says nothing about the server and
             // leaves the count as it is. Nothing is tracked when the pause is turned off.
             if (options.OutagePauseThreshold > 0 && sendStarted && IsTransportFailure(failure))
+            lock (stateLock)
             {
                 lastTransportFailureTicks = DateTime.UtcNow.Ticks;
+
+                // 2.4.0: with several senders, others can fail while a pause declared by one of
+                // them is already running. Their failures are recorded on their rows as usual but
+                // do not lengthen the pause: one outage, one pause step. (With one sender the
+                // pass ends at the pause, so this never applies.)
+                if (DateTime.UtcNow.Ticks < Interlocked.Read(ref pausedUntilTicks))
+                {
+                    if (!outageRowIds.Contains(taskId) && outageRowIds.Count < MaxTrackedOutageRows)
+                        outageRowIds.Add(taskId);
+                    return RowOutcome.Paused;
+                }
 
                 // Each email counts once per outage. A retry of an email already counted adds
                 // nothing: a server that refuses one message for its own content (size, content

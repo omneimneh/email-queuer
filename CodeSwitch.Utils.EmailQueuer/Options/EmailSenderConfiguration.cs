@@ -20,5 +20,7 @@ namespace CodeSwitch.Utils.EmailQueuer.Options
         public int? PollIntervalSeconds { get; set; }
         // 2.3.0-rc.2
         public int? SendTimeoutSeconds { get; set; }
+        // 2.4.0
+        public int? MaxConcurrentSends { get; set; }
     }
 }

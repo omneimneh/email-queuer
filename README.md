@@ -17,6 +17,9 @@ New in >= 2.1.0:
 - New status: `PermanentlyFailed` once retries are exhausted
 - Additional task fields: `RetryCount`, `NextAttemptOn`, `SentOn`
 
+New in 2.4.0 (no schema change, see [Sending several emails at once](#sending-several-emails-at-once-240)):
+- `MaxConcurrentSends` (default 1, the 2.3.0 behaviour): a worker can send up to N emails at the same time, each on its own SMTP connection, with priority, turns, the claim, the retry budget, the stale-claim reclaim and the send timeout unchanged
+
 New in 2.3.0 (**schema change**, see [Upgrading to 2.3.0](#upgrading-to-230)):
 - `Priority` and `PartitionKey` on each email, set through a new `EnqueueAsync` overload taking `EmailEnqueueOptions`
 - `LastError` and `LastErrorOn` on each email: why and when the last attempt failed
@@ -104,7 +107,8 @@ This is how your `appsettings.json` should look, replace `<SectionName>` with th
   "OutagePauseThreshold": 0,
   "StaleClaimMinutes": 10,
   "PartitionFairness": true,
-  "PollIntervalSeconds": 120
+  "PollIntervalSeconds": 120,
+  "MaxConcurrentSends": 1
   }
 ```
 The values shown for the retry and queue keys are the defaults; every one of them is optional. They are described under [Configuration keys](#configuration-keys).
@@ -124,6 +128,7 @@ options.RetryBackoffSeconds = 45;        // optional override (default 30)
 options.MaxRetryBackoffSeconds = 900;    // optional ceiling on one wait (default 0 = none)
 options.OutagePauseThreshold = 5;        // optional outage pause (default 0 = off)
 options.PollIntervalSeconds = 120;       // periodic wake (default 120, 0 = off)
+options.MaxConcurrentSends = 1;          // emails sent at once (default 1, at most 16)
 ```
 
 #### Use the email sender in your services or controllers
@@ -204,6 +209,13 @@ The worker also manages the SMTP connection itself instead of sharing one `SmtpC
 
 The `SmtpClient` you configure (`options.SmtpClient`, or the `Smtp` section) is used as a template: host, port, SSL, credentials, delivery method and certificates are copied to the client each connection uses. The message sent is the one FluentEmail.Smtp would have built. If you register an `ISender` other than FluentEmail's `SmtpSender`, the worker still calls it and stops waiting after `SendTimeoutSeconds`; a send your sender does not cancel keeps running in the background and may still go out, after which the retry sends it again.
 
+**Sending several emails at once (2.4.0).** <a id="sending-several-emails-at-once-240"></a>With `MaxConcurrentSends` = N above 1, each round of a pass reads up to max(10, 2N) due rows of the top priority (one per partition, in turn order, when several partitions have mail) and hands them to N senders. Each sender has its own database context and its own SMTP connection (or calls your `ISender`), and claims, sends and records its row exactly as the single sender does: CAS claim, claim deadline, send timeout, retry budget, `LastError`. The next round starts when the round's sends have ended, so a higher-priority email queued meanwhile waits at most one round, which with N senders is shorter than before. What stays sequential:
+- The probe after an outage pause is always one email, alone.
+- Once an outage pause is declared, or the host is stopping, or a row fails with an exception, no sender starts a new email; the sends already under way finish (each bounded by `SendTimeoutSeconds`) and are recorded. A failure that arrives while the pause runs is recorded on its row but does not lengthen the pause.
+- One pass at a time per process, as before: N is the most connections one worker opens to the mail server.
+
+Choose N from the mail server's limits, not from the queue length: N connections can be open at once, and the server may refuse more (`421 Too many connections`). Your `ISender`, if you register one, must be safe to call from N threads at once (the built-in SMTP path uses one connection per sender). The database sees the same number of commands per email; up to N + 1 pooled connections are used during a drain.
+
 **Database cost.** The worker never polls faster than `PollIntervalSeconds` (floor 30 seconds) and never retries in a loop. An idle wake is 2 queries. While draining it is 2 queries per email plus 2 per batch of up to 10 emails (one batch per turn between partitions when several have mail). The stale-claim check adds no query unless a stale row exists.
 
 ### Configuration keys
@@ -219,6 +231,7 @@ All of them are optional and bind from the same section as the SMTP settings.
 | `PartitionFairness` | true | 2.3.0. Take turns between partition keys within a priority |
 | `PollIntervalSeconds` | 120 | 2.3.0. Seconds between periodic wakes; 1 to 29 is raised to 30; 0 turns the periodic wake off |
 | `SendTimeoutSeconds` | 60 | 2.3.0. Bound on one send, connect included; floor 5, at most 80% of `StaleClaimMinutes`. A send past it fails and waits its retry backoff |
+| `MaxConcurrentSends` | 1 | 2.4.0. Emails one worker sends at the same time, each on its own connection; 0 or less means 1, capped at 16. 1 is the 2.3.0 behaviour |
 
 `RunHostedService` (default true) is set in code only.
 

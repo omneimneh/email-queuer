@@ -106,6 +106,19 @@ namespace CodeSwitch.Utils.EmailQueuer.Options
         /// raised to 30. 0 turns the periodic wake off (the pre-2.3.0 behaviour). Default 120.
         /// </summary>
         public int PollIntervalSeconds { get; set; } = 120;
+        /// <summary>Ceiling on <see cref="MaxConcurrentSends"/>, whatever the configuration says.</summary>
+        public const int MaxConcurrentSendsCeiling = 16;
+        /// <summary>
+        /// Emails one worker sends at the same time (2.4.0). 1 (the default) is the behaviour of 2.3.0
+        /// exactly: one email at a time on the pass's own connection. With N above 1 each round of a
+        /// pass hands its claimed rows to N senders, each with its own database context and its own
+        /// SMTP connection, so at most N connections are open to the mail server. Priority, turns
+        /// between partitions, the claim, the retry budget, the stale-claim reclaim and the send
+        /// timeout apply to every email as before; the probe after an outage pause is always sent
+        /// alone. A host that registers its own ISender must make it safe to call from N threads at
+        /// once. Values of 0 or less mean 1; capped at <see cref="MaxConcurrentSendsCeiling"/>.
+        /// </summary>
+        public int MaxConcurrentSends { get; set; } = 1;
 
         private NetworkCredential _sender;
 
@@ -201,6 +214,8 @@ namespace CodeSwitch.Utils.EmailQueuer.Options
                 if (ext.PartitionFairness != null) PartitionFairness = ext.PartitionFairness.Value;
                 if (ext.PollIntervalSeconds != null) PollIntervalSeconds = Math.Max(0, ext.PollIntervalSeconds.Value);
                 if (ext.SendTimeoutSeconds != null && ext.SendTimeoutSeconds.Value > 0) SendTimeoutSeconds = ext.SendTimeoutSeconds.Value;
+                // 2.4.0: absent keeps 1, the 2.3.0 behaviour.
+                if (ext.MaxConcurrentSends != null && ext.MaxConcurrentSends.Value > 0) MaxConcurrentSends = ext.MaxConcurrentSends.Value;
             }
         }
     }

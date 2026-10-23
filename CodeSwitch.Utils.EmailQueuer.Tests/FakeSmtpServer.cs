@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Net;
@@ -37,6 +38,9 @@ namespace CodeSwitch.Utils.EmailQueuer.Tests
         private int connections;
         private int messages;
         private int quits;
+        private int activeData;
+        private int peakData;
+        private readonly ConcurrentQueue<string> recipients = new ConcurrentQueue<string>();
 
         public FakeSmtpServer(Func<int, RelayBehavior> behaviorFor)
         {
@@ -50,6 +54,12 @@ namespace CodeSwitch.Utils.EmailQueuer.Tests
         public int Connections => Volatile.Read(ref connections);
         public int Messages => Volatile.Read(ref messages);
         public int Quits => Volatile.Read(ref quits);
+        /// <summary>Wait between the end of a message's data and the "250 queued" reply (a slow relay).</summary>
+        public TimeSpan DataDelay { get; set; } = TimeSpan.Zero;
+        /// <summary>Most messages whose data was being accepted at the same moment (concurrent sends).</summary>
+        public int PeakConcurrentData => Volatile.Read(ref peakData);
+        /// <summary>Every RCPT TO argument accepted, in arrival order, one entry per delivered message recipient.</summary>
+        public string[] Recipients => recipients.ToArray();
 
         private async Task AcceptLoopAsync()
         {
@@ -104,9 +114,12 @@ namespace CodeSwitch.Utils.EmailQueuer.Tests
                             await writer.WriteLineAsync("250-fake.local");
                             await writer.WriteLineAsync("250 8BITMIME");
                             break;
+                        case "RCPT":
+                            recipients.Enqueue(line.Substring(line.IndexOf(':') + 1).Trim().Trim('<', '>'));
+                            await writer.WriteLineAsync("250 OK");
+                            break;
                         case "HELO":
                         case "MAIL":
-                        case "RCPT":
                         case "RSET":
                         case "NOOP":
                             await writer.WriteLineAsync("250 OK");
@@ -114,7 +127,20 @@ namespace CodeSwitch.Utils.EmailQueuer.Tests
                         case "DATA":
                             await writer.WriteLineAsync("354 go ahead");
                             string data;
-                            while ((data = await reader.ReadLineAsync(stop.Token)) != null && data != ".") { }
+                            var active = Interlocked.Increment(ref activeData);
+                            int peak;
+                            while (active > (peak = Volatile.Read(ref peakData))
+                                   && Interlocked.CompareExchange(ref peakData, active, peak) != peak) { }
+                            try
+                            {
+                                while ((data = await reader.ReadLineAsync(stop.Token)) != null && data != ".") { }
+                                if (DataDelay > TimeSpan.Zero)
+                                    await Task.Delay(DataDelay, stop.Token);
+                            }
+                            finally
+                            {
+                                Interlocked.Decrement(ref activeData);
+                            }
                             delivered++;
                             Interlocked.Increment(ref messages);
                             await writer.WriteLineAsync("250 queued");
