@@ -153,10 +153,10 @@ namespace CodeSwitch.Utils.EmailQueuer.Tests
         public async Task Characterization_FluentEmail_SmtpSender_ignores_cancellation_on_a_silent_relay()
         {
             // Why 2.3.0-rc.1's 8-minute cancellation never fired: FluentEmail.Smtp 3.0.2 drops the
-            // token, and the async SmtpClient path has no Timeout. Kept as a guard: if a FluentEmail
-            // upgrade ever honours the token, this test fails and the bypass can be reconsidered.
+            // token. Kept as a guard: if a FluentEmail upgrade ever honours the token, this test fails
+            // and the bypass can be reconsidered. The client Timeout is far away so only the token could end it.
             using var relay = new FakeSmtpServer(_ => RelayBehavior.SilentFromStart);
-            using var client = new System.Net.Mail.SmtpClient("127.0.0.1", relay.Port) { EnableSsl = false, Timeout = 1000 };
+            using var client = new System.Net.Mail.SmtpClient("127.0.0.1", relay.Port) { EnableSsl = false, Timeout = 100000 };
             var sender = new FluentEmail.Smtp.SmtpSender(client);
             var email = new FluentEmail.Core.Email("sender@test.local").To("a@test.local").Subject("s").Body("b");
             email.Sender = sender;
@@ -165,10 +165,36 @@ namespace CodeSwitch.Utils.EmailQueuer.Tests
             var send = email.SendAsync(cts.Token);
             var finished = await Task.WhenAny(send, Task.Delay(TimeSpan.FromSeconds(4)));
 
-            Assert.NotSame(send, finished); // still running 3 s after cancellation and 3 s past SmtpClient.Timeout
+            Assert.NotSame(send, finished); // still running 3 s after cancellation
             client.SendAsyncCancel();       // release it
             await Task.WhenAny(send, Task.Delay(TimeSpan.FromSeconds(5)));
             _ = send.Exception;
+        }
+
+        [Fact]
+        public async Task Characterization_SmtpClient_Timeout_bounds_async_sends_on_NET10_only()
+        {
+            // The runtime decides, not the target: the queue raises the Timeout of its own clients (SmtpDelivery).
+            using var relay = new FakeSmtpServer(_ => RelayBehavior.SilentFromStart);
+            using var client = new System.Net.Mail.SmtpClient("127.0.0.1", relay.Port) { EnableSsl = false, Timeout = 1000 };
+            using var message = new System.Net.Mail.MailMessage("sender@test.local", "a@test.local", "s", "b");
+
+            var send = client.SendMailAsync(message);
+            var finished = await Task.WhenAny(send, Task.Delay(TimeSpan.FromSeconds(4)));
+
+            if (Environment.Version.Major >= 10)
+            {
+                Assert.Same(send, finished);
+                var error = await Assert.ThrowsAsync<System.Net.Mail.SmtpException>(() => send);
+                Assert.Contains("timed out", error.Message);
+            }
+            else
+            {
+                Assert.NotSame(send, finished); // still running 3 s past SmtpClient.Timeout
+                client.SendAsyncCancel();
+                await Task.WhenAny(send, Task.Delay(TimeSpan.FromSeconds(5)));
+                _ = send.Exception;
+            }
         }
 
         private async Task<(EmailQueuerTask first, EmailQueuerTask second)> WaitForRows(

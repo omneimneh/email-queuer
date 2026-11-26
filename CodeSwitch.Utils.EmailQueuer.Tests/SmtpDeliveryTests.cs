@@ -124,6 +124,21 @@ namespace CodeSwitch.Utils.EmailQueuer.Tests
         }
 
         [Fact]
+        public async Task A_client_Timeout_shorter_than_the_send_timeout_does_not_cut_a_send_short()
+        {
+            // .NET 10 applies SmtpClient.Timeout to SendMailAsync (.NET 8 does not); the send timeout must stay the only bound.
+            using var relay = new FakeSmtpServer(_ => RelayBehavior.Normal) { DataDelay = TimeSpan.FromMilliseconds(800) };
+            var template = Template(relay.Port);
+            template.Timeout = 200;
+            using var delivery = new SmtpDelivery(template, SendTimeout, TimeSpan.FromSeconds(30), 50);
+
+            await delivery.SendAsync(Data());
+
+            Assert.Equal(1, relay.Messages);
+            Assert.Equal(200, template.Timeout);
+        }
+
+        [Fact]
         public void Template_settings_are_copied_to_the_client_that_sends()
         {
             var template = Template(2525);

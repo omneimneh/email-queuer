@@ -1,5 +1,6 @@
 using FluentEmail.Core.Models;
 using System;
+using System.Linq;
 using System.Net.Mail;
 using System.Text;
 using System.Threading;
@@ -14,8 +15,10 @@ namespace CodeSwitch.Utils.EmailQueuer.Delivery
     /// <list type="bullet">
     /// <item>FluentEmail.Smtp 3.0.2 drops the cancellation token it is given, so a cancelled send
     /// keeps running.</item>
-    /// <item>System.Net.Mail.SmtpClient applies <see cref="SmtpClient.Timeout"/> to the synchronous
-    /// Send only. The asynchronous send has no timeout at all.</item>
+    /// <item>System.Net.Mail.SmtpClient on .NET 8 applies <see cref="SmtpClient.Timeout"/> to the
+    /// synchronous Send only. The asynchronous send has no timeout at all. .NET 10 applies it to the
+    /// asynchronous send too, so the client each connection uses never times out before the send
+    /// timeout does (2.5.0).</item>
     /// <item>The SmtpClient that AddSmtpSender registers is a singleton, and an asynchronous send
     /// that succeeds never closes its connection (only Dispose sends QUIT). The next send writes
     /// MAIL FROM onto that connection however long it has been idle. A connection a NAT or the
@@ -60,13 +63,15 @@ namespace CodeSwitch.Utils.EmailQueuer.Delivery
 
         /// <summary>
         /// Sends <paramref name="data"/>. Returns when the server accepted the message; throws the
-        /// SMTP or I/O failure otherwise, or a <see cref="TimeoutException"/> if the exchange did not
-        /// end within the send timeout.
+        /// SMTP or I/O failure otherwise, a <see cref="TimeoutException"/> if the exchange did not
+        /// end within the send timeout, or an <see cref="OperationCanceledException"/> if
+        /// <paramref name="cancellationToken"/> stopped it (the connection is aborted either way).
         /// </summary>
-        public async Task SendAsync(EmailData data)
+        public async Task SendAsync(EmailData data, CancellationToken cancellationToken = default)
         {
             if (disposed)
                 throw new ObjectDisposedException(nameof(SmtpDelivery));
+            cancellationToken.ThrowIfCancellationRequested();
 
             // Build first: a message that cannot be built is the message's fault and must not cost
             // the connection.
@@ -77,12 +82,14 @@ namespace CodeSwitch.Utils.EmailQueuer.Delivery
             if (client == null)
             {
                 client = CreateClient(template);
+                // .NET 10 applies Timeout to async sends too, so it must not fire before the send timeout does.
+                client.Timeout = (int)Math.Max(client.Timeout, Math.Min(int.MaxValue, (sendTimeout + AbortGrace).TotalMilliseconds));
                 ClientsCreated++;
                 sentOnClient = 0;
             }
 
             var current = client;
-            using var timeout = new CancellationTokenSource();
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             Task send;
             try
             {
@@ -99,7 +106,7 @@ namespace CodeSwitch.Utils.EmailQueuer.Delivery
             // pending connect, read or write. The extra grace bounds the wait even if an abort ever
             // failed to unwind the send: past it the client is abandoned, never awaited.
             timeout.CancelAfter(sendTimeout);
-            var finished = await Task.WhenAny(send, Task.Delay(sendTimeout + AbortGrace)).ConfigureAwait(false);
+            var finished = await Task.WhenAny(send, Task.Delay(sendTimeout + AbortGrace, cancellationToken)).ConfigureAwait(false);
 
             if (finished != send)
             {
@@ -107,6 +114,7 @@ namespace CodeSwitch.Utils.EmailQueuer.Delivery
                 _ = send.ContinueWith(t => { _ = t.Exception; message.Dispose(); },
                     CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
                 AbandonOrClose(current, completed: false);
+                cancellationToken.ThrowIfCancellationRequested();
                 throw TimedOut(null);
             }
 
@@ -119,6 +127,8 @@ namespace CodeSwitch.Utils.EmailQueuer.Delivery
                 message.Dispose();
                 // A failed SmtpClient has already aborted its connection; start the next send on a new one.
                 AbandonOrClose(current, completed: true);
+                if (cancellationToken.IsCancellationRequested)
+                    throw new OperationCanceledException("The SMTP send was cancelled; the connection was aborted", ex, cancellationToken);
                 if (timeout.IsCancellationRequested)
                     throw TimedOut(ex);
                 throw;
@@ -190,10 +200,17 @@ namespace CodeSwitch.Utils.EmailQueuer.Delivery
 
         /// <summary>
         /// The MailMessage FluentEmail.Smtp 3.0.2 (SmtpSender.CreateMailMessage) builds for the same
-        /// email, so moving off SmtpSender changes nothing in what is sent.
+        /// email, so moving off SmtpSender changes nothing in what is sent. Two additions (2.5.0): an
+        /// attachment marked IsInline with a ContentId is a linked resource of the HTML view, and a
+        /// ContentId with a control character is refused (<see cref="ArgumentException"/>).
         /// </summary>
         internal static MailMessage CreateMailMessage(EmailData data)
         {
+            // System.Net.Mail writes the Content-ID raw, so a line break in it would add header lines to the part.
+            foreach (var x in data.Attachments)
+                if (x.ContentId != null && x.ContentId.Any(char.IsControl))
+                    throw new ArgumentException($"The Content-ID of attachment '{x.Filename}' contains a control character", nameof(data));
+
             MailMessage message;
 
             if (!string.IsNullOrEmpty(data.PlaintextAlternativeBody))
@@ -237,8 +254,34 @@ namespace CodeSwitch.Utils.EmailQueuer.Delivery
                 case Priority.High: message.Priority = MailPriority.High; break;
             }
 
+            // An inline attachment with a Content-ID becomes a linked resource of the HTML view, so cid: images render.
+            AlternateView htmlView = null;
             foreach (var x in data.Attachments)
             {
+                if (x.IsInline && !string.IsNullOrEmpty(x.ContentId) && data.IsHtml)
+                {
+                    if (htmlView == null)
+                    {
+                        foreach (var view in message.AlternateViews)
+                            if (string.Equals(view.ContentType.MediaType, "text/html", StringComparison.OrdinalIgnoreCase))
+                                htmlView = view;
+                        if (htmlView == null)
+                        {
+                            htmlView = AlternateView.CreateAlternateViewFromString(data.Body,
+                                new System.Net.Mime.ContentType("text/html; charset=UTF-8"));
+                            message.AlternateViews.Add(htmlView);
+                            message.Body = string.Empty;
+                            message.IsBodyHtml = false;
+                        }
+                    }
+                    var resource = string.IsNullOrEmpty(x.ContentType)
+                        ? new LinkedResource(x.Data)
+                        : new LinkedResource(x.Data, x.ContentType);
+                    resource.ContentId = x.ContentId;
+                    htmlView.LinkedResources.Add(resource);
+                    continue;
+                }
+
                 var a = new System.Net.Mail.Attachment(x.Data, x.Filename, x.ContentType);
                 a.ContentId = x.ContentId;
                 message.Attachments.Add(a);

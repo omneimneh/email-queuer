@@ -1,5 +1,5 @@
 # Email Queuer
-A library for ASP.NET Core (.NET 8) that allows you to send emails without memory leaks and in a very clean way.
+A library for ASP.NET Core (.NET 8 and .NET 10) that allows you to send emails without memory leaks and in a very clean way.
 
 Features:
 - Background email queue persisted to your database (no in-memory growth / leaks)
@@ -16,6 +16,16 @@ New in >= 2.1.0:
 - Retry logic with backoff (RetryCount, NextAttemptOn, MaxRetryAttempts, RetryBackoffSeconds)
 - New status: `PermanentlyFailed` once retries are exhausted
 - Additional task fields: `RetryCount`, `NextAttemptOn`, `SentOn`
+
+New in 2.5.0 (no schema change, see [Upgrading to 2.5.0](#upgrading-to-250)):
+- Runs on .NET 10: the package ships `lib/net8.0` (EF Core 8) and `lib/net10.0` (EF Core 10). The 2.4.0 build fails on EF Core 10, whose `ExecuteUpdateAsync` takes a different setter type
+- `SendDirectAsync(IFluentEmail, CancellationToken)`: send an email you built yourself now, through the same sender and send timeout as the queue, without a queue row (see [Sending a ready-made email now](#sending-a-ready-made-email-now-250))
+- Inline images: an attachment marked `IsInline` with a `ContentId` is sent as part of the HTML body, so `<img src="cid:...">` renders
+- `FinishedModelScrubber`: remove secrets such as a starting password from the stored model once the email is finished (see [Removing sensitive values after sending](#removing-sensitive-values-after-sending-250))
+- PreMailer.Net 2.7.4 (AngleSharp 1.7.2, clear of GHSA-pgww-w46g-26qg); the CSS moved inline is byte for byte the same as before on the library's test templates
+- Razor.Templating.Core 2.0.0
+- On .NET 10, `SmtpClient.Timeout` also applies to asynchronous sends; the queue keeps `SendTimeoutSeconds` as the only bound on its sends
+- The package carries XML documentation and embedded symbols
 
 New in 2.4.0 (no schema change, see [Sending several emails at once](#sending-several-emails-at-once-240)):
 - `MaxConcurrentSends` (default 1, the 2.3.0 behaviour): a worker can send up to N emails at the same time, each on its own SMTP connection, with priority, turns, the claim, the retry budget, the stale-claim reclaim and the send timeout unchanged
@@ -172,6 +182,63 @@ await emailQueuer.EnqueueAsync(email, "Weekly digest", "Digest", model, new Emai
 * A partition key longer than 64 characters is rejected with an `ArgumentException` at enqueue time.
 * The existing overloads are unchanged and keep queuing normal-priority mail with no partition key. One source-level caveat: a call that passes a literal `null` as the fifth argument is now ambiguous between `string cc` and `EmailEnqueueOptions`; write `cc: null` or `(string)null`.
 
+#### Sending a ready-made email now (2.5.0)
+`SendDirectAsync` sends an email you built yourself, at once, for what a queue row cannot carry: per-message headers (`List-Unsubscribe` for instance) and inline images. `AddEmailQueuer` registers `IFluentEmailFactory`, so create the email with it.
+```csharp
+var email = fluentEmailFactory.Create()
+    .To("someone@example.com")
+    .Subject("What's new")
+    .Body(html, true)                  // contains <img src="cid:logo">
+    .PlaintextAlternativeBody(text);
+email.Header("List-Unsubscribe", "<https://example.com/unsubscribe>");
+email.Attach(new FluentEmail.Core.Models.Attachment
+{
+    Data = new MemoryStream(logoBytes),
+    Filename = "logo.png",
+    ContentType = "image/png",
+    ContentId = "logo",
+    IsInline = true
+});
+await emailQueuer.SendDirectAsync(email);
+```
+* No queue row is written, so there is no retry, priority, turn or outage pause. The caller owns retries and its own record of what was sent.
+* Build a new email for every attempt: the send disposes the email's attachment streams, so sending the same `IFluentEmail` twice fails.
+* Create the email with `IFluentEmailFactory`. An email made with `new Email(...)` carries FluentEmail's default sender, which saves the message to the root of the disk; `SendDirectAsync` refuses it (and an email with no sender) with `InvalidOperationException`.
+* The email goes through the same sender as the queue: the built-in SMTP path on a connection of its own, closed with `QUIT`, or your `ISender`. The send is bounded by `SendTimeoutSeconds`, and by the optional `CancellationToken`, which aborts an SMTP send like a timeout does.
+* It throws `TimeoutException` when the send did not finish in time and `OperationCanceledException` when the token stopped it (either way the email may or may not have been delivered), the `SmtpException` or `IOException` of a transport failure, and `InvalidOperationException` when your `ISender` reports a failure.
+* **Inline images.** With the built-in SMTP path, an attachment with `IsInline = true` and a `ContentId` on an HTML email is sent as a linked resource of the HTML body (`multipart/related`), so `<img src="cid:logo">` shows the image. With a plain-text alternative, the HTML part carries it. An inline attachment without a `ContentId`, or on a text-only email, is a normal attachment. Every other attachment is sent as before. A `ContentId` containing a control character (a line break for instance) is refused with `ArgumentException`, since System.Net.Mail would write it into the part's headers as is. A custom `ISender` handles attachments its own way.
+
+#### Removing sensitive values after sending (2.5.0)
+A queued email's model is stored as JSON in `ModelJson` and stays there after the email is sent. When a model carries a secret the email needs only for rendering (a starting password, a password-reset link, a one-time code), set `FinishedModelScrubber` to remove it once the row is finished:
+
+```csharp
+options.FinishedModelScrubber = MailModelScrubber.Scrub;
+```
+```csharp
+using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
+using System.IO;
+
+public static class MailModelScrubber
+{
+    public static string Scrub(string template, string modelJson)
+    {
+        var reader = new JsonTextReader(new StringReader(modelJson)) { DateParseHandling = DateParseHandling.None };
+        if (JToken.ReadFrom(reader) is not JObject model || !model.Remove("Password"))
+            return modelJson;
+        return model.ToString(Formatting.None);
+    }
+}
+```
+
+* It is called once, when a row ends `Sent`, or `PermanentlyFailed` after its last attempt, with the row's template name and its `ModelJson`. What it returns is saved by the same UPDATE that records the status: no second write, and no moment where the status is final but the secret is still stored. A row that will be retried keeps its whole model, because the retry renders the email again.
+* The email is rendered from the full model before the scrub; only the stored copy loses the value.
+* Returning `null` or the string unchanged keeps the model. If it throws, the worker logs a warning with the task id and the exception type only (a JSON parser's message can quote the model), keeps the model and still records the status, so the scrubber can never cause a second send.
+* With `MaxConcurrentSends` above 1 it is called from several sends at once: keep it thread safe and quick, with no I/O.
+* The keys are the ones `JsonConvert` wrote at enqueue time: the property names as declared, unless you changed `JsonConvert.DefaultSettings`.
+* Not covered: rows the stale-claim reclaim retires to `PermanentlyFailed` (one bulk UPDATE, no row is loaded), and rows that finished before the option was set. Clean those with a job of your own, on `Status` 2 (Sent) and 4 (PermanentlyFailed).
+* A scrubbed row sent again with `ManuallySendEmailAsync`, or set back to `Pending`, renders without the removed values.
+
 ### Retry & Failure Handling
 Each task moves through these statuses:
 - `Pending` -> queued and not yet processed
@@ -203,7 +270,7 @@ Backoff formula: `nextDelay = min(MaxRetryBackoffSeconds, RetryBackoffSeconds * 
 
 **Stale claims.** A row left in `Sending` for longer than `StaleClaimMinutes` (the worker died mid-send) goes back to `Error`. Since 2.3.0 that counts as a failed attempt: `RetryCount` is incremented, `LastError` says the claim expired, and a row already at the end of its budget becomes `PermanentlyFailed`. A send that hangs never leaves its row in `Sending`: it fails after `SendTimeoutSeconds`.
 
-**Hung sends (2.3.0).** Every send runs under `SendTimeoutSeconds` (default 60, floor 5, at most 80% of `StaleClaimMinutes`). The bound covers the whole exchange: connecting, TLS, AUTH and the message. When it fires, the connection is aborted, the attempt is recorded like any other failure (`LastError` = `TimeoutException: The SMTP send to host:port did not complete within N seconds...`, `NextAttemptOn` = now + the retry backoff), and the worker sends the next email. `SmtpClient.Timeout` does not do this: .NET applies it to the synchronous `Send` only, and FluentEmail.Smtp 3.0.2 ignores the cancellation token it is given.
+**Hung sends (2.3.0).** Every send runs under `SendTimeoutSeconds` (default 60, floor 5, at most 80% of `StaleClaimMinutes`). The bound covers the whole exchange: connecting, TLS, AUTH and the message. When it fires, the connection is aborted, the attempt is recorded like any other failure (`LastError` = `TimeoutException: The SMTP send to host:port did not complete within N seconds...`, `NextAttemptOn` = now + the retry backoff), and the worker sends the next email. `SmtpClient.Timeout` does not do this: .NET 8 applies it to the synchronous `Send` only, and FluentEmail.Smtp 3.0.2 ignores the cancellation token it is given. .NET 10 applies `SmtpClient.Timeout` (milliseconds) to asynchronous sends too; since 2.5.0 the client each connection uses never times out before `SendTimeoutSeconds` does, so a small `Timeout` cannot fail the queue's sends.
 
 The worker also manages the SMTP connection itself instead of sharing one `SmtpClient` for the life of the process. A connection is reused only between sends less than 30 seconds apart and for at most 50 messages, and it is closed with `QUIT` when the pass ends. Before, an asynchronous send never closed its connection, and the next send, however much later, wrote `MAIL FROM` onto it. A connection that a NAT dropped while idle (Azure drops idle flows silently after 4 minutes) never answered, and the send waited about 16 minutes for the operating system to give up on TCP, holding every email queued behind it.
 
@@ -233,7 +300,7 @@ All of them are optional and bind from the same section as the SMTP settings.
 | `SendTimeoutSeconds` | 60 | 2.3.0. Bound on one send, connect included; floor 5, at most 80% of `StaleClaimMinutes`. A send past it fails and waits its retry backoff |
 | `MaxConcurrentSends` | 1 | 2.4.0. Emails one worker sends at the same time, each on its own connection; 0 or less means 1, capped at 16. 1 is the 2.3.0 behaviour |
 
-`RunHostedService` (default true) is set in code only.
+`RunHostedService` (default true) and `FinishedModelScrubber` (default null, 2.5.0) are set in code only.
 
 You can manually inspect or reset failed tasks (e.g., set `Status = Pending`, `RetryCount = 0`, `NextAttemptOn = null`) if you introduce a manual admin UI (not included by default).
 
@@ -274,6 +341,36 @@ If it does not call `Initialize`, the two strings are generated as `nvarchar(max
 - One retry wait is never longer than 24 hours.
 
 **4. Optional.** Set `MaxRetryBackoffSeconds`, `OutagePauseThreshold` and a larger `MaxRetryAttempts` to ride out a mail server outage (see the budget table above). Do not raise `MaxRetryAttempts` past about 20 on 2.2.1 or older: the wait overflows there.
+
+### Upgrading to 2.5.0
+**1. Nothing to change in code or in the schema.** The public API only gains `SendDirectAsync` and the `FinishedModelScrubber` option (null by default, which keeps every model as before); the queue table, the statuses, the claim, the retries and the outage pause are those of 2.4.0. The background pass that an `EnqueueAsync` starts still runs in that caller's async context (culture, request state, `AsyncLocal` values), as before.
+
+One behaviour change, for `SendDirectAsync` only: an attachment whose `ContentId` contains a control character (a line break for instance) is refused with `ArgumentException`, because System.Net.Mail writes the Content-ID into the part's headers as is. Queued emails attach files by path, which sets no Content-ID, so the queue is not affected.
+
+**2. Pick up the target that matches your app.** A net8.0 app gets the net8.0 build (EF Core 8), a net10.0 app the net10.0 build (EF Core 10). NuGet gives other targets the nearest lower build: net9.0 gets the net8.0 build, net11.0 the net10.0 build (not tested with EF Core 11). The 2.4.0 build cannot run on EF Core 10: its first `ExecuteUpdateAsync` (the claim) fails, because EF Core 10 replaced the `SetPropertyCalls` setter type with `UpdateSettersBuilder`.
+- A net10.0 app must use EF Core 10 with 2.5.0. An app that has to stay on EF Core 8 or 9 while targeting net10.0 keeps 2.4.0.
+- Microsoft support for .NET 8 ended on 10 November 2026. The net8.0 build is there so .NET 8 apps can take 2.5.0 and move to .NET 10 when they are ready.
+
+**3. Dependency floors.** NuGet takes the higher of your version and these. A direct reference to a lower version fails the restore with `NU1605` (package downgrade): raise it, or remove it and let the package bring it.
+
+| Target | EF Core and EF Core Relational | Microsoft.Extensions.Hosting.Abstractions | PreMailer.Net | Razor.Templating.Core |
+|---|---|---|---|---|
+| net8.0 | 8.0.10 | 8.0.0 | 2.7.4 | 2.0.0 |
+| net10.0 | 10.0.0 | 10.0.0 | 2.7.4 | 2.0.0 |
+
+EF Core 8.0.10 is the first EF Core 8 patch whose `Microsoft.Extensions.Caching.Memory` dependency is not affected by CVE-2024-43483. PreMailer.Net 2.7.4 replaces AngleSharp 0.14.0 (GHSA-pgww-w46g-26qg) with 1.7.2. A pin of PreMailer.Net below 2.7.4 must be raised: the `MoveCssInline` overload 2.5.0 calls is missing from older PreMailer versions (2.2.0 for one), which would fail every email with `MissingMethodException`.
+
+AngleSharp moves from 0.x to 1.x. A package that pins AngleSharp 0.x exactly fails the restore with `NU1107` (version conflict); HtmlSanitizer 9 and older pin 0.17.1, HtmlSanitizer 10 and later use AngleSharp 1.x and work. The CSS moved inline is byte for byte the same as with 2.4.0 on the library's test templates (layout, nested styles, tables, comments, entities); check a few of your own emails after upgrading.
+
+Razor.Templating.Core 2.0.0 removed `RazorTemplateEngine.Initialize()` and the generic `RenderAsync<TModel>`. Code of yours that calls them through this package's reference moves to `RazorTemplateEngine.RenderAsync(viewName, model, viewData)`.
+
+**4. The ASP.NET Core runtime is still required.** Razor.Templating.Core references the `Microsoft.AspNetCore.App` shared framework, as in every earlier version, so a generic-host (worker) app needs the ASP.NET Core runtime too.
+
+**5. Keep Razor.Templating.Core at 2.0.0.** 2.1.0 renders with the ambient MVC `ActionContext`. The background pass inherits the context of the caller that started it (point 1), so with 2.1.0 a queued email can render with the context of the request that queued it, and fail once that request has ended. The library's test for this fails with 2.1.0 and passes with 2.0.0.
+
+**6. `SmtpClient.Timeout` on .NET 10.** The value is in milliseconds, and .NET 10 applies it to asynchronous sends, which .NET 8 does not (dotnet/runtime PR 115722 made `SendMailAsync` share the synchronous path and its timer). The queue's own connections never time out before `SendTimeoutSeconds`, so nothing changes for the queue; any other code of yours that sends through an `SmtpClient` with a small `Timeout` will now time out.
+
+**7. Addresses with two consecutive dots on .NET 10.** The .NET 10 runtime refuses an address such as `a..b@example.com` (`FormatException`), which .NET 8 accepted. This follows the runtime, not the build: a net8.0 app running on .NET 10 is affected too. Such an email fails every attempt and ends `PermanentlyFailed`; check addresses before queueing them.
 
 ### Notes
 - The library does not create tables automatically; manage schema via migrations.

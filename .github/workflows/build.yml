@@ -31,10 +31,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # The package targets net8.0 and net10.0; building net10.0 needs the .NET 10 SDK.
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: '8.0.x'
+          dotnet-version: |
+            8.0.x
+            10.0.x
 
       - name: Restore
         run: dotnet restore CodeSwitch.Utils.EmailQueuer/CodeSwitch.Utils.EmailQueuer.csproj

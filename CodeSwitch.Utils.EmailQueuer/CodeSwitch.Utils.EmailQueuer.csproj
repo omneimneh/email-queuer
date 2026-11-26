@@ -1,13 +1,14 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net8.0</TargetFramework>
+    <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
     <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
     <Authors>Omar Mneimneh</Authors>
     <PackageId>CodeSwitch.Utils.EmailQueuer</PackageId>
     <PackageTags>Email, Smtp, Queue, Razor</PackageTags>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
-    <PackageReleaseNotes>2.4.0: Optional concurrent sends. The new MaxConcurrentSends option (configuration key of the same name, default 1 = the 2.3.0 behaviour exactly, capped at 16) lets one worker send up to N emails at the same time, each sender with its own database context and its own SMTP connection. Priority, per-partition turns, the CAS claim, the retry budget, the stale-claim reclaim and the per-email send timeout are unchanged; the probe after an outage pause is always sent alone, and no new send starts once a pause is declared or the host is stopping. No schema change. A host that registers its own ISender must make it thread safe before raising the option.
+    <PackageReleaseNotes>2.5.0: Runs on .NET 10. The package now ships lib/net8.0 (built against EF Core 8) and lib/net10.0 (built against EF Core 10). The 2.4.0 build failed on EF Core 10 at its first ExecuteUpdateAsync (the claim and the stale-claim reclaim), because EF Core 10 replaced SetPropertyCalls with UpdateSettersBuilder; the net10.0 build is compiled against the new API. Minimum dependencies per target: net8.0 takes EF Core 8.0.10 (the first 8.0.x whose Microsoft.Extensions.Caching.Memory dependency is patched against CVE-2024-43483) and Microsoft.Extensions 8.0.0; net10.0 takes EF Core 10.0.0 and Microsoft.Extensions 10.0.0. PreMailer.Net 2.2.0 -&gt; 2.7.4, which brings AngleSharp 1.7.2 instead of 0.14.0 (GHSA-pgww-w46g-26qg); MoveCssInline output is unchanged on the library's test templates. Razor.Templating.Core 1.9.0 -&gt; 2.0.0, which removed Initialize() and the generic RenderAsync&lt;TModel&gt;, neither used here (3.x is net10.0 only; 2.1.0 renders with the ambient ActionContext, which the background pass inherits from the caller, and fails once that request has ended). New: SendDirectAsync(IFluentEmail, CancellationToken) sends an already-built email now, without a queue row, through the same sender and send timeout as the queue; it refuses an email not created with IFluentEmailFactory, whose default sender would save it to disk. New: an attachment marked IsInline with a ContentId is sent as a linked resource of the HTML body (multipart/related), so &lt;img src="cid:..."&gt; renders; other attachments are sent as before. Behaviour change (SendDirectAsync only, queued emails set no ContentId): an attachment whose ContentId contains a control character is refused with ArgumentException, since System.Net.Mail writes it into the part headers as is. New: EmailQueuerOptions.FinishedModelScrubber (Func&lt;string, string, string&gt;: template name, stored ModelJson, returns the ModelJson to keep; default null keeps every model as before) removes values such as a starting password from a finished row's model: it is called once when a row ends Sent, or PermanentlyFailed after its last attempt, after the email was rendered, and its result is saved by the same UPDATE that records the status; a retried row keeps its model; a null or unchanged result keeps the model; an exception is logged by type only, the model is kept and the status still saved; rows the stale-claim reclaim retires are not passed to it. .NET 10 applies SmtpClient.Timeout (milliseconds) to asynchronous sends, which .NET 8 does not (dotnet/runtime PR 115722); the client each queue connection uses is now never given a Timeout shorter than SendTimeoutSeconds, so SendTimeoutSeconds stays the only bound on every runtime. The package now carries XML documentation and embedded symbols. No schema change; the public API only gains SendDirectAsync and FinishedModelScrubber. Restore can fail for a host that pins EF Core 8 below 8.0.10, PreMailer.Net below 2.7.4 or Razor.Templating.Core below 2.0.0 (NU1605), that uses a package pinning AngleSharp 0.x such as HtmlSanitizer 9 or older (NU1107), or that targets net10.0 with EF Core 8 or 9; see the README section "Upgrading to 2.5.0".
+2.4.0: Optional concurrent sends. The new MaxConcurrentSends option (configuration key of the same name, default 1 = the 2.3.0 behaviour exactly, capped at 16) lets one worker send up to N emails at the same time, each sender with its own database context and its own SMTP connection. Priority, per-partition turns, the CAS claim, the retry budget, the stale-claim reclaim and the per-email send timeout are unchanged; the probe after an outage pause is always sent alone, and no new send starts once a pause is declared or the host is stopping. No schema change. A host that registers its own ISender must make it thread safe before raising the option.
 2.3.0: Priority and per-partition fairness (new Priority and PartitionKey columns, new EnqueueAsync overload taking EmailEnqueueOptions); the failure reason is recorded on the row (new LastError and LastErrorOn columns); retry waits can be capped (MaxRetryBackoffSeconds) and can no longer overflow into an immediate-retry loop; optional outage pause (OutagePauseThreshold) so a mail server outage does not burn every queued email's retry budget; periodic wake (PollIntervalSeconds, default 120) so rows made due outside the process are picked up; the worker can no longer wedge after an exception or run two loops at once; stale claims count as a failed attempt; StaleClaimMinutes is bindable from configuration. A send that hangs no longer holds the queue: every send is bounded by the new SendTimeoutSeconds option (default 60, connect and TLS included); past it the connection is aborted, the attempt is recorded (TimeoutException in LastError) and retried after its backoff, and the worker goes on with the next email. The worker no longer sends through FluentEmail.Smtp's SmtpSender, which ignores cancellation, nor through one SmtpClient for the life of the process, whose idle connection was reused and, once dropped silently by a NAT, hung about 16 minutes: one connection per pass, reused only while sends are under 30 seconds apart (at most 50 messages), closed with QUIT at the end of the pass. The message built is the same. SCHEMA CHANGE: the host must add four columns to the queue table, see the README section "Upgrading to 2.3.0". (Includes 2.3.0-rc.1 and 2.3.0-rc.2.)
 2.2.1: Fix stale-claim reclaim missing legacy rows — rows moved to Sending by pre-2.2.0 code have no NextAttemptOn deadline stamped and were orphaned forever; the reclaim now also recovers NULL-deadline Sending rows older than StaleClaimMinutes (by CreatedOn) back to Error for normal retry. No schema change.
 2.2.0: Atomic CAS claim of queued emails (ExecuteUpdateAsync Pending/Error -&gt; Sending only if the row is still in the read status) so multiple worker instances can no longer double-send; stale-claim reclaim of rows left in Sending past a stamped deadline (reuses the existing NextAttemptOn column, no schema change); new RunHostedService option to gate the background worker on parked/standby instances while keeping EnqueueAsync available; configurable StaleClaimMinutes (default 10).</PackageReleaseNotes>
@@ -19,20 +20,36 @@
     <PackageProjectUrl>https://github.com/omneimneh/email-queuer</PackageProjectUrl>
     <AssemblyVersion>1.0.0.0</AssemblyVersion>
     <FileVersion>1.0.0.0</FileVersion>
-  <Version>2.4.0</Version>
+  <Version>2.5.0</Version>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+    <DebugType>embedded</DebugType>
+    <ContinuousIntegrationBuild Condition="'$(GITHUB_ACTIONS)' == 'true'">true</ContinuousIntegrationBuild>
+    <EnablePackageValidation>true</EnablePackageValidation>
+    <PackageValidationBaselineVersion>2.4.0</PackageValidationBaselineVersion>
   </PropertyGroup>
 
   <ItemGroup>
     <PackageReference Include="FluentEmail.Core" Version="3.0.2" />
     <PackageReference Include="FluentEmail.Smtp" Version="3.0.2" />
-    <PackageReference Include="Microsoft.EntityFrameworkCore" Version="8.0.0" />
-    <!-- Relational provides the bulk-update extensions (ExecuteUpdateAsync) used by the 2.2.0
-         atomic CAS claim + stale-claim reclaim. The library is consumed against SQL Server. -->
-    <PackageReference Include="Microsoft.EntityFrameworkCore.Relational" Version="8.0.0" />
-    <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" Version="8.0.0" />
     <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
-    <PackageReference Include="PreMailer.Net" Version="2.2.0" />
-    <PackageReference Include="Razor.Templating.Core" Version="1.9.0" />
+    <PackageReference Include="PreMailer.Net" Version="2.7.4" />
+    <!-- 2.0.0, not 2.1.0: 2.1.0 renders with the ambient ActionContext, which the background pass inherits, and fails once that request has ended. -->
+    <PackageReference Include="Razor.Templating.Core" Version="2.0.0" />
+  </ItemGroup>
+
+  <!-- Each target takes the lowest versions it supports; the host lifts them. Relational provides ExecuteUpdateAsync. -->
+  <ItemGroup Condition="'$(TargetFramework)' == 'net8.0'">
+    <!-- 8.0.10 is the first EF Core 8 patch whose Microsoft.Extensions.Caching.Memory is not affected by CVE-2024-43483. -->
+    <PackageReference Include="Microsoft.EntityFrameworkCore" Version="8.0.10" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Relational" Version="8.0.10" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" Version="8.0.0" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(TargetFramework)' == 'net10.0'">
+    <PackageReference Include="Microsoft.EntityFrameworkCore" Version="10.0.0" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Relational" Version="10.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" Version="10.0.0" />
   </ItemGroup>
 
   <ItemGroup>
@@ -49,5 +66,5 @@
       <PackagePath></PackagePath>
     </None>
   </ItemGroup>
- 
+
 </Project>

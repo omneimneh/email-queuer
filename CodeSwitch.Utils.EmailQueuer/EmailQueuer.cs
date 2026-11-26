@@ -2,6 +2,8 @@
 using CodeSwitch.Utils.EmailQueuer.Models;
 using CodeSwitch.Utils.EmailQueuer.Options;
 using FluentEmail.Core;
+using FluentEmail.Core.Defaults;
+using FluentEmail.Core.Interfaces;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -229,9 +231,12 @@ namespace CodeSwitch.Utils.EmailQueuer
         /// </summary>
         /// <typeparam name="T">Type of the model should match the one in the template</typeparam>
         /// <param name="to">List of email addresses</param>
-        /// <param name="template">Template email</param>
-        /// <param name="model">The model with contains the data</param>
-        /// <param name="subId">Optional unsubscribe link with subscription Id</param>
+        /// <param name="subject">Subject of the email</param>
+        /// <param name="template">Template name, formatted into TemplatePath</param>
+        /// <param name="model">The model that contains the data</param>
+        /// <param name="cc">Email address or ';' separated list of emails</param>
+        /// <param name="bcc">Email address or ';' separated list of emails</param>
+        /// <param name="attachementPaths">';' separated list of file paths to attach</param>
         /// <returns>Async task (does not wait for the email to be sent)</returns>
         public Task EnqueueAsync<T>(IEnumerable<string> to, string subject, string template, T model, string cc = "", string bcc = "", string attachementPaths = "")
         {
@@ -242,10 +247,13 @@ namespace CodeSwitch.Utils.EmailQueuer
         /// Add email to queue for sending
         /// </summary>
         /// <typeparam name="T">Type of the model should match the one in the template</typeparam>
-        /// <param name="to">Email addresss or ';' seperated list of emails</param>
-        /// <param name="template">Template email</param>
-        /// <param name="model">The model with contains the data</param>
-        /// <param name="subId">Optional unsubscribe link with subscription Id</param>
+        /// <param name="to">Email address or ';' separated list of emails</param>
+        /// <param name="subject">Subject of the email</param>
+        /// <param name="template">Template name, formatted into TemplatePath</param>
+        /// <param name="model">The model that contains the data</param>
+        /// <param name="cc">Email address or ';' separated list of emails</param>
+        /// <param name="bcc">Email address or ';' separated list of emails</param>
+        /// <param name="attachmentPaths">';' separated list of file paths to attach</param>
         /// <returns>Async task (does not wait for the email to be sent)</returns>
         public async Task EnqueueAsync<T>(string to, string subject, string template, T model, string cc = "", string bcc = "", string attachmentPaths = "")
         {
@@ -257,8 +265,9 @@ namespace CodeSwitch.Utils.EmailQueuer
         /// </summary>
         /// <typeparam name="T">Type of the model should match the one in the template</typeparam>
         /// <param name="to">List of email addresses</param>
-        /// <param name="template">Template email</param>
-        /// <param name="model">The model with contains the data</param>
+        /// <param name="subject">Subject of the email</param>
+        /// <param name="template">Template name, formatted into TemplatePath</param>
+        /// <param name="model">The model that contains the data</param>
         /// <param name="enqueueOptions">CC, BCC, attachments, priority and partition key; null means the defaults</param>
         /// <returns>Async task (does not wait for the email to be sent)</returns>
         public Task EnqueueAsync<T>(IEnumerable<string> to, string subject, string template, T model, EmailEnqueueOptions enqueueOptions)
@@ -270,9 +279,10 @@ namespace CodeSwitch.Utils.EmailQueuer
         /// Add email to queue for sending, with a priority and/or a partition key (2.3.0)
         /// </summary>
         /// <typeparam name="T">Type of the model should match the one in the template</typeparam>
-        /// <param name="to">Email addresss or ';' seperated list of emails</param>
-        /// <param name="template">Template email</param>
-        /// <param name="model">The model with contains the data</param>
+        /// <param name="to">Email address or ';' separated list of emails</param>
+        /// <param name="subject">Subject of the email</param>
+        /// <param name="template">Template name, formatted into TemplatePath</param>
+        /// <param name="model">The model that contains the data</param>
         /// <param name="enqueueOptions">CC, BCC, attachments, priority and partition key; null means the defaults</param>
         /// <exception cref="ArgumentException">If the partition key is longer than 64 characters</exception>
         /// <returns>Async task (does not wait for the email to be sent)</returns>
@@ -332,6 +342,38 @@ namespace CodeSwitch.Utils.EmailQueuer
             using var delivery = CreateDelivery();
             var email = await BuildEmailAsync(emailTask, fluent);
             await DeliverAsync(email, delivery);
+        }
+
+        /// <summary>
+        /// Sends an already-built email now, without a queue row, through the same sender and send timeout as the
+        /// queue. The caller owns retries, and builds a new email for each attempt: the send disposes the email's
+        /// attachment streams. Throws <see cref="TimeoutException"/> when the send did not finish in time (delivery
+        /// unknown), <see cref="OperationCanceledException"/> when <paramref name="cancellationToken"/> stopped it
+        /// (delivery unknown), the SMTP or I/O exception on a transport failure, and
+        /// <see cref="InvalidOperationException"/> when the sender reported a failure.
+        /// </summary>
+        /// <param name="email">The email to send, created with IFluentEmailFactory</param>
+        /// <param name="cancellationToken">Stops the send; an SMTP send is aborted like a timed-out one</param>
+        /// <exception cref="ArgumentNullException">If <paramref name="email"/> is null</exception>
+        /// <exception cref="InvalidOperationException">If <paramref name="email"/> was not created with IFluentEmailFactory
+        /// (it has no sender, or FluentEmail's default one, which saves to disk)</exception>
+        public async Task SendDirectAsync(IFluentEmail email, CancellationToken cancellationToken = default)
+        {
+            if (email == null) throw new ArgumentNullException(nameof(email));
+            if (email.Sender == null || (email.Sender is SaveToDiskSender && !HostSendsToDisk()))
+                throw new InvalidOperationException(
+                    "The email has no sender or FluentEmail's default one, which saves to disk: create it with IFluentEmailFactory");
+            cancellationToken.ThrowIfCancellationRequested();
+            using var delivery = CreateDelivery();
+            await DeliverAsync(email, delivery, cancellationToken);
+        }
+
+        private bool HostSendsToDisk()
+        {
+            if (factory == null)
+                return false;
+            using var scope = factory.CreateScope();
+            return scope.ServiceProvider.GetService<ISender>() is SaveToDiskSender;
         }
 
         /// <summary>
@@ -430,21 +472,23 @@ namespace CodeSwitch.Utils.EmailQueuer
         /// not stop when cancelled is abandoned, not awaited. A response the sender marks
         /// unsuccessful is a failure.
         /// </summary>
-        private async Task DeliverAsync(IFluentEmail email, SmtpDelivery delivery)
+        private async Task DeliverAsync(IFluentEmail email, SmtpDelivery delivery, CancellationToken cancellationToken = default)
         {
             if (email.Sender is FluentEmail.Smtp.SmtpSender && options.SmtpClient != null)
             {
-                await delivery.SendAsync(email.Data);
+                await delivery.SendAsync(email.Data, cancellationToken);
                 return;
             }
 
             var sendTimeout = delivery.SendTimeout;
-            using var timeout = new CancellationTokenSource(sendTimeout);
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeout.CancelAfter(sendTimeout);
             var send = email.SendAsync(timeout.Token);
-            var finished = await Task.WhenAny(send, Task.Delay(sendTimeout));
+            var finished = await Task.WhenAny(send, Task.Delay(sendTimeout, cancellationToken));
             if (finished != send)
             {
                 _ = send.ContinueWith(t => _ = t.Exception, TaskContinuationOptions.OnlyOnFaulted);
+                cancellationToken.ThrowIfCancellationRequested();
                 throw new TimeoutException($"The send did not complete within {(long)sendTimeout.TotalSeconds} seconds and was abandoned");
             }
 
@@ -455,6 +499,7 @@ namespace CodeSwitch.Utils.EmailQueuer
             }
             catch (OperationCanceledException) when (timeout.IsCancellationRequested)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 throw new TimeoutException($"The send did not complete within {(long)sendTimeout.TotalSeconds} seconds and was cancelled");
             }
 
@@ -465,7 +510,7 @@ namespace CodeSwitch.Utils.EmailQueuer
             }
         }
 
-        private async Task<string> GenerateEmailBody(string template, object model)
+        internal async Task<string> GenerateEmailBody(string template, object model)
         {
             var viewDataOrViewBag = new Dictionary<string, object>();
             viewDataOrViewBag["Subject"] = template.ToString();
@@ -886,6 +931,7 @@ namespace CodeSwitch.Utils.EmailQueuer
                 emailTask.SentOn = DateTime.UtcNow;
                 emailTask.LastError = null;
                 emailTask.LastErrorOn = null;
+                ScrubFinishedModel(emailTask);
                 await SaveAndReleaseAsync(context);
 
                 // The mail server answered: any outage is over.
@@ -902,6 +948,7 @@ namespace CodeSwitch.Utils.EmailQueuer
             if (emailTask.RetryCount > options.MaxRetryAttempts)
             {
                 emailTask.Status = EmailTaskStatus.PermanentlyFailed;
+                ScrubFinishedModel(emailTask);
                 logger.LogWarning("Email task {TaskId} permanently failed after {Sends} sends", taskId, emailTask.RetryCount);
             }
             else
@@ -1009,6 +1056,32 @@ namespace CodeSwitch.Utils.EmailQueuer
             {
                 logger.LogInformation("Email queue outage state cleared: no transport failure for {Seconds} seconds", (long)memory.TotalSeconds);
                 ResetOutageState();
+            }
+        }
+
+        /// <summary>
+        /// Applies <see cref="EmailQueuerOptions.FinishedModelScrubber"/> to a row that has just reached a final
+        /// status, before the save that records it, so one UPDATE writes both (2.5.0). A scrubber that throws
+        /// keeps the model and is logged by exception type only, since its message could quote the model; it is
+        /// never rethrown, because a throw on the Sent path would skip the save and the reclaim would send the
+        /// email again.
+        /// </summary>
+        private void ScrubFinishedModel(EmailQueuerTask emailTask)
+        {
+            var scrubber = options.FinishedModelScrubber;
+            if (scrubber == null || string.IsNullOrEmpty(emailTask.ModelJson))
+                return;
+
+            try
+            {
+                var scrubbed = scrubber(emailTask.Template, emailTask.ModelJson);
+                if (scrubbed != null && !string.Equals(scrubbed, emailTask.ModelJson, StringComparison.Ordinal))
+                    emailTask.ModelJson = scrubbed;
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning("Email task {TaskId}: the finished-model scrubber failed ({ExceptionType}); the model is kept",
+                    emailTask.Id, ex.GetType().Name);
             }
         }
 

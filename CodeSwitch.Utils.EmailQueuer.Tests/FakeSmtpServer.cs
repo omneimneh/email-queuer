@@ -41,6 +41,7 @@ namespace CodeSwitch.Utils.EmailQueuer.Tests
         private int activeData;
         private int peakData;
         private readonly ConcurrentQueue<string> recipients = new ConcurrentQueue<string>();
+        private readonly ConcurrentQueue<string> messageData = new ConcurrentQueue<string>();
 
         public FakeSmtpServer(Func<int, RelayBehavior> behaviorFor)
         {
@@ -60,6 +61,8 @@ namespace CodeSwitch.Utils.EmailQueuer.Tests
         public int PeakConcurrentData => Volatile.Read(ref peakData);
         /// <summary>Every RCPT TO argument accepted, in arrival order, one entry per delivered message recipient.</summary>
         public string[] Recipients => recipients.ToArray();
+        /// <summary>The raw DATA (headers and MIME body, dot-unstuffed) of every delivered message, in arrival order.</summary>
+        public string[] MessageData => messageData.ToArray();
 
         private async Task AcceptLoopAsync()
         {
@@ -127,13 +130,15 @@ namespace CodeSwitch.Utils.EmailQueuer.Tests
                         case "DATA":
                             await writer.WriteLineAsync("354 go ahead");
                             string data;
+                            var body = new StringBuilder();
                             var active = Interlocked.Increment(ref activeData);
                             int peak;
                             while (active > (peak = Volatile.Read(ref peakData))
                                    && Interlocked.CompareExchange(ref peakData, active, peak) != peak) { }
                             try
                             {
-                                while ((data = await reader.ReadLineAsync(stop.Token)) != null && data != ".") { }
+                                while ((data = await reader.ReadLineAsync(stop.Token)) != null && data != ".")
+                                    body.Append(data.StartsWith("..") ? data.Substring(1) : data).Append("\r\n");
                                 if (DataDelay > TimeSpan.Zero)
                                     await Task.Delay(DataDelay, stop.Token);
                             }
@@ -142,6 +147,7 @@ namespace CodeSwitch.Utils.EmailQueuer.Tests
                                 Interlocked.Decrement(ref activeData);
                             }
                             delivered++;
+                            messageData.Enqueue(body.ToString());
                             Interlocked.Increment(ref messages);
                             await writer.WriteLineAsync("250 queued");
                             break;

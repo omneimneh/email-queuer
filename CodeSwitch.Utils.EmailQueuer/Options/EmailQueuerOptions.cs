@@ -73,8 +73,8 @@ namespace CodeSwitch.Utils.EmailQueuer.Options
         /// the row records a TimeoutException in LastError and waits its retry backoff, and the
         /// worker goes on with the next email. Floored at 5 and capped at 80% of
         /// <see cref="StaleClaimMinutes"/>; 0 or less means the default, 60.
-        /// <see cref="System.Net.Mail.SmtpClient.Timeout"/> does not bound the queue's sends: .NET
-        /// applies it to the synchronous Send only.
+        /// <see cref="System.Net.Mail.SmtpClient.Timeout"/> does not bound the queue's sends: .NET 8
+        /// applies it to the synchronous Send only, and on .NET 10 the queue raises it to at least this timeout.
         /// </summary>
         public int SendTimeoutSeconds { get; set; } = DefaultSendTimeoutSeconds;
         /// <summary>
@@ -119,6 +119,21 @@ namespace CodeSwitch.Utils.EmailQueuer.Options
         /// once. Values of 0 or less mean 1; capped at <see cref="MaxConcurrentSendsCeiling"/>.
         /// </summary>
         public int MaxConcurrentSends { get; set; } = 1;
+        /// <summary>
+        /// Removes values from the stored model of a finished email (2.5.0), such as a starting password,
+        /// a reset link or a one-time code the email needed only for rendering. Called once when a row ends
+        /// Sent, or PermanentlyFailed after its last attempt, with the row's template name and its stored
+        /// <see cref="Models.EmailQueuerTask.ModelJson"/>; the value returned is saved as ModelJson by the
+        /// same UPDATE that records the status. It is not called for a row that will be retried, nor for
+        /// a row with no model. Returning null or the input unchanged keeps the model. An exception thrown
+        /// here is logged with the task id and the exception type only (its message could quote the model),
+        /// the model is kept and the status is still saved. With <see cref="MaxConcurrentSends"/> above 1 it
+        /// runs from several sends at once, so it must be thread safe and quick, with no I/O.
+        /// Rows the stale-claim reclaim retires to PermanentlyFailed with one bulk UPDATE are not passed to
+        /// it: the host cleans those itself. A scrubbed row sent again with ManuallySendEmailAsync renders
+        /// without the removed values. Null (the default) keeps every model, as in 2.4.0.
+        /// </summary>
+        public Func<string, string, string> FinishedModelScrubber { get; set; }
 
         private NetworkCredential _sender;
 
